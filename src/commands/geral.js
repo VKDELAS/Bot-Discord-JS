@@ -1,6 +1,6 @@
 // src/commands/geral.js — /iniciar, /atualizar-paineis, /status-bot
 'use strict'
-const { SlashCommandBuilder, MessageFlags, PermissionFlagsBits, EmbedBuilder } = require('discord.js')
+const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder } = require('discord.js')
 
 const CHANNEL_IDS = { central_tickets: '1488504060117123084', central_registros: '1487024883626938570', central_gerencia: '1487025285340598322' }
 const COLOR_MS13  = 0x0000FF
@@ -25,7 +25,7 @@ const iniciar = {
       if (ticketsChannel) {
         const { buildCentralTicketsView } = require('../systems/tickets')
         const ticketsPayload = await buildCentralTicketsView(guild)
-        await smartPost(ticketsChannel, { ...ticketsPayload, flags: MessageFlags.IsComponentsV2 })
+        await smartPost(ticketsChannel, ticketsPayload)
       }
       const registrosChannel = guild.channels.cache.get(CHANNEL_IDS.central_registros)
       if (registrosChannel) {
@@ -54,7 +54,7 @@ const atualizarPaineis = {
     try {
       const { guild, client } = interaction
       const channelEntries = [
-        { id: CHANNEL_IDS.central_tickets,   builder: 'buildCentralTicketsView',   system: 'tickets',   useV2: true  },
+        { id: CHANNEL_IDS.central_tickets,   builder: 'buildCentralTicketsView',   system: 'tickets',   useV2: false },
         { id: CHANNEL_IDS.central_registros, builder: null,                        system: 'registros', useV2: false },
         { id: CHANNEL_IDS.central_gerencia,  builder: 'buildCentralGerenciaView',  system: 'gerencia',  useV2: false },
       ]
@@ -71,7 +71,7 @@ const atualizarPaineis = {
         } else {
           payload = await sys[entry.builder](guild)
         }
-        await channel.send({ ...payload, ...(entry.useV2 ? { flags: MessageFlags.IsComponentsV2 } : {}) })
+        await channel.send(payload)
       }
       await interaction.editReply({ content: '✅ Todos os painéis foram recriados!' })
     } catch (err) {
