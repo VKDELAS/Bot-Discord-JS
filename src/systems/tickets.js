@@ -3,16 +3,18 @@
 
 const {
   ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder,
-  PermissionFlagsBits, AttachmentBuilder,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
+  PermissionFlagsBits,
   ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
   MediaGalleryBuilder, MediaGalleryItemBuilder,
   MessageFlags,
 } = require('discord.js')
 
 const {
-  COLOR_ERROR, FOOTER_TEXT, ROLES, CHANNEL_IDS, _PERM_TICKET_ROLE_ID,
+  ROLES, CHANNEL_IDS, _PERM_TICKET_ROLE_ID,
 } = require('../config/settings.js')
+
+const { gerarEEnviarTranscript } = require('./transcript.js')
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  CONSTANTES
@@ -31,6 +33,44 @@ const customIds = [
 
 // ticketContextMap: canal.id → { tipo, openerTag, openerId, userMention, extraData }
 const ticketContextMap = new Map()
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TIMER DE INATIVIDADE (idêntico ao _timer_inatividade do PY)
+//  Fecha o ticket automaticamente após X segundos sem atividade
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function _timerInatividade(canal, segundos) {
+  await new Promise(res => setTimeout(res, segundos * 1000))
+
+  // Canal pode ter sido excluído — verifica antes de prosseguir
+  try { await canal.fetch() } catch { return }
+
+  // Se já foi fechado manualmente, ticketContextMap não tem mais a entrada
+  if (!ticketContextMap.has(canal.id)) return
+
+  const { EmbedBuilder } = require('discord.js')
+  try {
+    await canal.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('⏱️ Ticket Fechado por Inatividade')
+          .setDescription(
+            'Este ticket foi fechado automaticamente por inatividade (1h30).\n' +
+            'Se precisar de ajuda, abra um novo ticket.'
+          )
+          .setColor(0xed4245),
+      ],
+    })
+  } catch { return }
+
+  await new Promise(res => setTimeout(res, 5000))
+
+  ticketContextMap.delete(canal.id)
+
+  const botUser = canal.guild.members.me?.user ?? canal.client.user
+  await gerarEEnviarTranscript(canal, botUser).catch(() => {})
+  try { await canal.delete('Ticket fechado por inatividade') } catch {}
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  BUILDERS DE CONTENT (markdown nativo — idêntico ao PY)
@@ -196,38 +236,9 @@ function buildTicketButtons(tipo, aceito = false) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  TRANSCRIPT
+//  TRANSCRIPT — delegado para src/systems/transcript.js
 // ══════════════════════════════════════════════════════════════════════════════
-
-async function gerarTranscript(channel) {
-  try {
-    const messages = await channel.messages.fetch({ limit: 100 })
-    const sorted   = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-    return sorted.map(m =>
-      `[${new Date(m.createdTimestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}] ${m.author.tag}: ${m.content || '[sem texto]'}`
-    ).join('\n')
-  } catch {
-    return '[falha ao gerar transcript]'
-  }
-}
-
-async function postarTranscript(guild, channel, tipo, opener) {
-  try {
-    const logsChannel = guild.channels.cache.get(CHANNEL_IDS.logs_geral)
-    if (!logsChannel) return
-    const conteudo = await gerarTranscript(channel)
-    const arquivo  = new AttachmentBuilder(Buffer.from(conteudo, 'utf8'), { name: `transcript-${channel.name}.txt` })
-    const embed    = new EmbedBuilder()
-      .setTitle('📋 Transcript de Ticket Fechado')
-      .setDescription(`**Canal:** #${channel.name}\n**Tipo:** ${tipo}\n**Aberto por:** ${opener}`)
-      .setColor(COLOR_ERROR)
-      .setFooter({ text: FOOTER_TEXT })
-      .setTimestamp()
-    await logsChannel.send({ embeds: [embed], files: [arquivo] })
-  } catch (err) {
-    console.error('[tickets] Erro ao postar transcript:', err)
-  }
-}
+// gerarEEnviarTranscript(channel, fechadoPor) importado no topo
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  CRIAÇÃO DE CANAL
@@ -267,8 +278,6 @@ async function criarCanalTicket(guild, user, tipo) {
 async function fecharTicket(interaction) {
   const canal     = interaction.channel
   const ctx       = ticketContextMap.get(canal.id)
-  const tipo      = ctx?.tipo      ?? 'desconhecido'
-  const openerTag = ctx?.openerTag ?? 'Desconhecido'
 
   await interaction.deferUpdate()
 
@@ -277,7 +286,7 @@ async function fecharTicket(interaction) {
   } catch {}
 
   ticketContextMap.delete(canal.id)
-  await postarTranscript(interaction.guild, canal, tipo, openerTag)
+  await gerarEEnviarTranscript(canal, interaction.user)
 
   setTimeout(async () => {
     try { await canal.delete('Ticket fechado') } catch {}
@@ -320,6 +329,7 @@ async function execute(interaction) {
         const canal = await criarCanalTicket(guild, user, 'recrutamento')
         ticketContextMap.set(canal.id, { tipo: 'recrutamento', openerTag: user.tag, openerId: user.id, userMention: user.toString(), extraData: null })
         await canal.send({ content: buildRecContent(user.toString()), components: [buildTicketButtons('recrutamento')] })
+        _timerInatividade(canal, 5400)  // 1h30 — idêntico ao Python
         return interaction.editReply({
           content: (
             `# 🚀 Ticket Aberto\n` +
