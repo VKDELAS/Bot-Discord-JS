@@ -279,6 +279,11 @@ async function fecharTicket(interaction) {
   const canal     = interaction.channel
   const ctx       = ticketContextMap.get(canal.id)
 
+  const msgInicialBackup = {
+    content: interaction.message.content,
+    embeds: interaction.message.embeds
+  };
+
   await interaction.deferUpdate()
 
   try {
@@ -286,7 +291,8 @@ async function fecharTicket(interaction) {
   } catch {}
 
   ticketContextMap.delete(canal.id)
-  await gerarEEnviarTranscript(canal, interaction.user)
+
+  await gerarEEnviarTranscript(canal, interaction.user, msgInicialBackup)
 
   setTimeout(async () => {
     try { await canal.delete('Ticket fechado') } catch {}
