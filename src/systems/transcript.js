@@ -1,4 +1,4 @@
-// src/systems/transcript.js — MS-13 (Visual Discord Finalizado v3)
+// src/systems/transcript.js — MS-13 (Visual Discord Finalizado v5)
 // USO: await gerarEEnviarTranscript(channel, fechadoPor, msgInicialBackup)
 
 'use strict'
@@ -65,32 +65,63 @@ function _fmtTs(date) {
   return date.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }) + ' ' + hhmm
 }
 
-function _fmtMd(t) {
+/**
+ * Processa o Markdown e as Menções Dinâmicas
+ */
+function _fmtMd(t, channel) {
   t = _escape(t)
-  // Bold
+  
+  // 1. Títulos (Markdown Headers #, ##, ###)
+  // Tratamos o # no início da linha para virar um header elegante
+  t = t.replace(/^#\s+(.+)$/gm, '<h1 class="md-h1">$1</h1>')
+  t = t.replace(/^##\s+(.+)$/gm, '<h2 class="md-h2">$1</h2>')
+  t = t.replace(/^###\s+(.+)$/gm, '<h3 class="md-h3">$1</h3>')
+
+  // 2. Formatação Básica
   t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-  // Italic
   t = t.replace(/\*(.+?)\*/g, '<em>$1</em>')
-  // Underline
   t = t.replace(/__(.+?)__/g, '<u>$1</u>')
-  // Strikethrough
   t = t.replace(/~~(.+?)~~/g, '<del>$1</del>')
-  // Code
   t = t.replace(/`([^`]+)`/g, '<code>$1</code>')
-  // Mentions
-  t = t.replace(/&lt;@!?(\d+)&gt;/g, "<span class='mention'>@usuário</span>")
-  t = t.replace(/&lt;#(\d+)&gt;/g, "<span class='mention'>#canal</span>")
-  t = t.replace(/&lt;@&amp;(\d+)&gt;/g, "<span class='mention'>@cargo</span>")
-  // Subtext
+  
+  // 3. Menções Dinâmicas (Busca nomes reais no servidor)
+  // User Mention: <@ID> or <@!ID>
+  t = t.replace(/&lt;@!?(\d+)&gt;/g, (match, id) => {
+    const member = channel.guild.members.cache.get(id)
+    const name = member ? member.displayName : 'usuário'
+    return `<span class='mention'>@${_escape(name)}</span>`
+  })
+  
+  // Role Mention: <@&ID>
+  t = t.replace(/&lt;@&amp;(\d+)&gt;/g, (match, id) => {
+    const role = channel.guild.roles.cache.get(id)
+    const name = role ? role.name : 'cargo'
+    return `<span class='mention'>@${_escape(name)}</span>`
+  })
+
+  // Channel Mention: <#ID>
+  t = t.replace(/&lt;#(\d+)&gt;/g, (match, id) => {
+    const chan = channel.guild.channels.cache.get(id)
+    const name = chan ? chan.name : 'canal'
+    return `<span class='mention-channel'>#${_escape(name)}</span>`
+  })
+  
+  // 4. Limpeza de menções residuais "feias" que o usuário reportou
+  // Remove padrões como "# @usuário" ou "@usuário" soltos que ficaram de versões anteriores
+  t = t.replace(/#\s*@\s*usuário/g, '') // Remove o erro específico reportado
+  t = t.replace(/@usuário/g, '')       // Remove se sobrar sem ID
+  t = t.replace(/@cargo/g, '')         // Remove se sobrar sem ID
+
+  // 5. Subtext & Quotes
   t = t.replace(/^-#\s*(.+)$/m, "<span class='subtext'>$1</span>")
-  // Quotes (Blockquotes)
   t = t.replace(/^&gt;\s*(.+)$/gm, "<blockquote>$1</blockquote>")
+  
   return t
 }
 
 // ── build mensagens ────────────────────────────────────────────────────────────
 
-function _buildMsgs(msgs) {
+function _buildMsgs(msgs, channel) {
   const out  = []
   let prevId = null
   let prevTimestamp = null
@@ -167,7 +198,7 @@ function _buildMsgs(msgs) {
     // conteúdo
     if (msg.content) {
       const contentHtml = msg.content.split('\n').map(linha => {
-        return linha.trim() ? _fmtMd(linha) : '';
+        return linha.trim() ? _fmtMd(linha, channel) : '';
       }).join('\n');
       out.push(`<div class="message-text">${contentHtml}</div>`);
     }
@@ -179,13 +210,13 @@ function _buildMsgs(msgs) {
       let desc = ''
       if (emb.description) {
         desc = emb.description.split('\n').map(l =>
-          `<div class="embed-description-line">${l.trim() ? _fmtMd(l) : '&nbsp;'}</div>`
+          `<div class="embed-description-line">${l.trim() ? _fmtMd(l, channel) : '&nbsp;'}</div>`
         ).join('')
       }
       const fields = (emb.fields || []).map(f =>
         `<div class="embed-field">` +
         `<div class="embed-field-name">${_escape(f.name)}</div>` +
-        `<div class="embed-field-value">${_fmtMd(f.value)}</div>` +
+        `<div class="embed-field-value">${_fmtMd(f.value, channel)}</div>` +
         `</div>`
       ).join('')
       
@@ -246,7 +277,7 @@ function _gerarHtml(channel, msgs, dono, fechadoPor) {
   const fechaEm = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
 
   const msgsHtml = msgs.length
-    ? _buildMsgs(msgs)
+    ? _buildMsgs(msgs, channel)
     : '<div class="empty-messages">Nenhuma mensagem registrada neste atendimento.</div>'
 
   return `<!DOCTYPE html>
@@ -270,6 +301,7 @@ function _gerarHtml(channel, msgs, dono, fechadoPor) {
             --interactive-hover: #dbdee1;
             --mention-bg: rgba(88, 101, 242, 0.3);
             --mention-text: #c9cdfb;
+            --mention-hover: #5865f2;
             --ms13-accent: #3a71c1;
         }
 
@@ -339,7 +371,32 @@ function _gerarHtml(channel, msgs, dono, fechadoPor) {
         .message-text { color: var(--text-normal); font-size: 1rem; white-space: pre-wrap; word-wrap: break-word; }
         
         /* Mentions & MD */
-        .mention { background-color: var(--mention-bg); color: var(--mention-text); padding: 0 2px; border-radius: 3px; font-weight: 500; }
+        .mention { 
+            background-color: var(--mention-bg); 
+            color: var(--mention-text); 
+            padding: 0 4px; 
+            border-radius: 3px; 
+            font-weight: 500; 
+            cursor: pointer;
+            transition: background-color 50ms ease-out, color 50ms ease-out;
+        }
+        .mention:hover {
+            background-color: var(--mention-hover);
+            color: #ffffff;
+        }
+        .mention-channel {
+            background-color: rgba(255, 255, 255, 0.05);
+            color: var(--text-normal);
+            padding: 0 4px;
+            border-radius: 3px;
+            font-weight: 500;
+        }
+        
+        /* Markdown Headers */
+        .md-h1 { font-size: 1.5rem; font-weight: 700; color: var(--header-primary); margin: 8px 0 4px; }
+        .md-h2 { font-size: 1.25rem; font-weight: 700; color: var(--header-primary); margin: 6px 0 3px; }
+        .md-h3 { font-size: 1.1rem; font-weight: 700; color: var(--header-primary); margin: 4px 0 2px; }
+
         strong { font-weight: 700; color: var(--header-primary); }
         code { background: var(--bg-tertiary); padding: 0.2rem; border-radius: 3px; font-family: Consolas, monospace; font-size: 85%; }
         .subtext { font-size: 0.75rem; color: var(--text-muted); display: block; margin-top: 2px; }
@@ -449,25 +506,19 @@ async function gerarEEnviarTranscript(channel, fechadoPor, msgInicialBackup = nu
     msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp)
 
     // --- RECUPERAÇÃO DA MENSAGEM INICIAL ---
-    // Se a primeira mensagem foi editada (pelo fecharTicket), nós restauramos o backup
     if (msgInicialBackup && msgs.length > 0) {
-      // Procuramos a mensagem do bot que foi editada
       const firstMsg = msgs[0];
       if (firstMsg.author.bot) {
-        // Substituímos o conteúdo pelo backup
         firstMsg.content = msgInicialBackup.content || firstMsg.content;
         firstMsg.embeds = msgInicialBackup.embeds || firstMsg.embeds;
       }
     }
 
     // --- LOGICA DE REMOÇÃO DE ENCERRAMENTO ---
-    // Agora que restauramos a inicial, removemos apenas a mensagem de encerramento real.
     const keywords = ['atendimento encerrado', 'excluído automaticamente', 'operador responsável'];
     
     const finalMsgs = msgs.filter((m, index) => {
-      // NUNCA removemos a primeira mensagem agora
       if (index === 0) return true;
-      
       if (m.author.bot && index >= msgs.length - 1) {
         const content = (m.content || '').toLowerCase();
         const hasKeyword = keywords.some(k => content.includes(k));

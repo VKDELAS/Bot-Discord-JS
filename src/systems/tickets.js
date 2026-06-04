@@ -414,7 +414,12 @@ async function execute(interaction) {
   // ── MODAIS ───────────────────────────────────────────────────────────────────
   if (['sup_modal_v14', 'eli_modal_v14', 'par_modal_v14'].includes(id)) {
     const tipoMap = { sup_modal_v14: 'suporte', eli_modal_v14: 'elite', par_modal_v14: 'parceria' }
+    const nomeMap = { suporte: 'Suporte Geral', elite: 'Elite', parceria: 'Parceria' }
+    const prefixoMap = { suporte: 'suporte-', elite: 'elite-', parceria: 'parceria-' }
+    
     const tipo    = tipoMap[id]
+    const nomeCategoria = nomeMap[tipo]
+    const prefixo = prefixoMap[tipo]
 
     const extraData = id === 'sup_modal_v14'
       ? interaction.fields.getTextInputValue('sup_motivo')
@@ -431,13 +436,14 @@ async function execute(interaction) {
     try {
       const existente = guild.channels.cache.find(c =>
         c.topic?.includes(`owner:${user.id}`) &&
-        ['suporte-', 'elite-', 'parceria-'].some(p => c.name.startsWith(p))
+        c.name.startsWith(prefixo)
       )
       if (existente) {
+        const frase = tipo === 'elite' ? `um **Ticket Elite**` : `um ticket de **${nomeCategoria}**`
         return interaction.editReply({
           content: (
             `# ⚠️ Ticket já existente\n` +
-            `Você já possui um ticket de **${tipo}** aberto.\n\n` +
+            `Você já possui ${frase} aberto.\n\n` +
             `> Canal do ticket\n` +
             `> ${existente}\n\n` +
             `📝 Para evitar duplicatas, finalize o atendimento atual antes de abrir um novo.`
