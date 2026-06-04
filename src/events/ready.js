@@ -1,69 +1,78 @@
 // src/events/ready.js
-
 'use strict'
 
-const { REST, Routes } = require('discord.js')
+const { REST, Routes, Events } = require('discord.js')
 const fs   = require('fs')
 const path = require('path')
+const { logger } = require('../utils/logger')
 
 module.exports = {
-  name: 'ready',
+  name: Events.ClientReady,  // 'clientReady' — corrige o DeprecationWarning do v14
   once: true,
 
   async execute(client) {
-    console.log(`[ready] Bot online como ${client.user.tag}`)
 
-    // ── Deploy dos slash commands via REST ─────────────────────────────────
+    // ── Coleta slash commands ────────────────────────────────────────────────
     const commands     = []
     const commandsPath = path.join(__dirname, '../commands')
     const files        = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'))
 
     for (const file of files) {
       const mod = require(path.join(commandsPath, file))
-      // Cada arquivo de commands exporta array ou objeto com .data
       if (Array.isArray(mod.commands)) {
-        for (const cmd of mod.commands) {
-          commands.push(cmd.data.toJSON())
-        }
+        for (const cmd of mod.commands) commands.push(cmd.data.toJSON())
+      } else if (Array.isArray(mod)) {
+        for (const cmd of mod) if (cmd.data) commands.push(cmd.data.toJSON())
       } else if (mod.data) {
         commands.push(mod.data.toJSON())
       }
     }
 
-    try {
-      const rest    = new REST().setToken(process.env.TOKEN_MS13)
-      const guildId = process.env.GUILD_ID
+    // ── Registra slash commands ──────────────────────────────────────────────
+    let slashOk  = false
+    let slashErr = null
 
-      if (!guildId) {
-        console.warn('[ready] GUILD_ID não definido — slash commands não foram registrados.')
-      } else {
+    const guildId = process.env.GUILD_ID
+    if (!guildId) {
+      slashErr = 'GUILD_ID não definido no .env'
+    } else {
+      try {
+        const rest = new REST().setToken(process.env.TOKEN_MS13)
         await rest.put(
           Routes.applicationGuildCommands(client.user.id, guildId),
           { body: commands }
         )
-        console.log(`[ready] ${commands.length} slash command(s) registrado(s) na guild ${guildId}`)
+        slashOk = true
+      } catch (err) {
+        slashErr = err.message?.split('\n')[0] ?? 'Erro desconhecido'
       }
-    } catch (err) {
-      console.error('[ready] Erro ao registrar slash commands:', err)
     }
 
-    // ── Inicia loop de multas ──────────────────────────────────────────────
+    // ── Loop de multas ───────────────────────────────────────────────────────
+    let loopOk = false
     try {
-      // Import dentro da função para evitar circular (registros → manager → ...)
       const { iniciarLoopMultas } = require('../systems/registros')
       iniciarLoopMultas(client)
-      console.log('[ready] Loop de multas iniciado.')
-    } catch (err) {
-      console.warn('[ready] sistemas/registros não disponível ainda:', err.message)
-    }
+      loopOk = true
+    } catch (_) {}
 
-    // ── Reagenda advertência de meta pendente ──────────────────────────────
+    // ── Adv de meta ──────────────────────────────────────────────────────────
+    let advOk = false
     try {
       const { aguardarEAplicarAdv } = require('../systems/metas')
       await aguardarEAplicarAdv(client)
-      console.log('[ready] Adv de meta pendente reagendada.')
-    } catch (err) {
-      console.warn('[ready] sistemas/metas não disponível ainda:', err.message)
-    }
+      advOk = true
+    } catch (_) {}
+
+    // ── Painel final ─────────────────────────────────────────────────────────
+    logger.online({
+      tag:    client.user.tag,
+      id:     client.user.id,
+      guilds: client.guilds.cache.size,
+      slashOk,
+      slashErr,
+      loopOk,
+      advOk,
+    })
   },
 }

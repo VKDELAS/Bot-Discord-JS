@@ -1,6 +1,5 @@
 // src/events/interactionCreate.js
 // Roteador central — NÃO coloca lógica aqui, apenas roteia para o system correto.
-
 'use strict'
 
 module.exports = {
@@ -10,7 +9,7 @@ module.exports = {
   async execute(interaction, client, systemHandlers) {
     try {
 
-      // ── Slash commands ───────────────────────────────────────────────────
+      // ── Slash commands ────────────────────────────────────────────────────
       if (interaction.isChatInputCommand()) {
         const cmd = client.commands.get(interaction.commandName)
         if (!cmd) {
@@ -25,22 +24,32 @@ module.exports = {
       const customId = interaction.customId
       if (!customId) return
 
-      // Tenta match exato primeiro
+      // Match exato primeiro
       if (systemHandlers.has(customId)) {
         await systemHandlers.get(customId)(interaction, client)
         return
       }
 
-      // IDs dinâmicos — match por prefixo
-      // ap_ e re_ são prefixos de aprovação/reprovação de recrutamento
-      const prefixos = ['ap_', 're_', 'ticket_', 'reg_', 'meta_', 'ger_']
+      // Match por prefixo (IDs dinâmicos: ap_userId, re_userId, rec_*, ticket_*, etc.)
+      const prefixos = [
+        'ap_', 're_',           // metas: aprovar/recusar
+        'rec_', 'modal_',       // recrutamento
+        'ticket_', 'reg_',      // outros
+        'meta_', 'ger_',
+        'sel_', 'sup_', 'eli_', 'par_',  // tickets
+      ]
+
       for (const prefixo of prefixos) {
         if (customId.startsWith(prefixo)) {
+          // Tenta match exato primeiro (já tentado acima), agora tenta handler do prefixo
           const handler = systemHandlers.get(prefixo)
           if (handler) {
             await handler(interaction, client)
             return
           }
+          // Se não tem handler de prefixo, percorre todos os handlers para encontrar um que cubra
+          // (os systems com customIds[] já registraram os IDs exatos, não prefixos)
+          break
         }
       }
 
@@ -48,8 +57,6 @@ module.exports = {
 
     } catch (err) {
       console.error('[interactionCreate] Erro ao processar interação:', err)
-
-      // Tenta responder com erro sem crashar
       try {
         const payload = { content: '❌ Ocorreu um erro ao processar esta ação.', flags: 64 }
         if (interaction.replied || interaction.deferred) {
@@ -58,7 +65,7 @@ module.exports = {
           await interaction.reply(payload)
         }
       } catch {
-        // Silencia erro de reply — interação pode ter expirado
+        // Silencia — interação pode ter expirado
       }
     }
   },

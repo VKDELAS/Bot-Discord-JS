@@ -1,6 +1,8 @@
-node_modules/
 .env
 *.db
-*.log
-data/*.db
-data/*.json
+node_modules/
+multas_processadas.json
+metas_data.json
+registros.json
+rec_config.json
+transcripts/
