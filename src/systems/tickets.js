@@ -167,7 +167,7 @@ function buildCentralTicketsMessage() {
   const container = new ContainerBuilder()
     .setAccentColor(0x0000FF)
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent('## CENTRAL DE ATENDIMENTO MS-13')
+      new TextDisplayBuilder().setContent('# ATENDIMENTO MS-13')
     )
     .addSeparatorComponents(
       new SeparatorBuilder()
@@ -176,8 +176,11 @@ function buildCentralTicketsMessage() {
       new TextDisplayBuilder().setContent(
         'Abra um ticket na categoria correspondente para falar com nossa liderança sobre ' +
         '**recrutamento, suporte, Elite ou parcerias** com a MS-13.\n\n' +
-        'Selecione abaixo a opção que melhor descreve o seu atendimento.'
+        'Selecione abaixo a categoria que melhor descreve o seu atendimento e nossa equipe irá analisar o mais rápido possível.'
       )
+    )
+    .addSeparatorComponents(
+      new SeparatorBuilder()
     )
     .addMediaGalleryComponents(
       new MediaGalleryBuilder().addItems(
