@@ -2,10 +2,15 @@
 'use strict'
 const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder } = require('discord.js')
 
-const CHANNEL_IDS = { central_tickets: '1488504060117123084', central_registros: '1487024883626938570', central_gerencia: '1487025285340598322' }
+const CHANNEL_IDS = {
+  central_tickets:   '1488504060117123084',
+  central_registros: '1487024883626938570',
+  central_gerencia:  '1487025285340598322',
+}
 const COLOR_MS13  = 0x0000FF
 const FOOTER_TEXT = 'MS-13 Roleplay © Todos os direitos reservados'
 
+// Edita a última mensagem do bot no canal, ou envia uma nova
 async function smartPost(channel, payload) {
   try {
     const messages = await channel.messages.fetch({ limit: 20 })
@@ -15,44 +20,58 @@ async function smartPost(channel, payload) {
   return channel.send(payload)
 }
 
+// ─── /iniciar ─────────────────────────────────────────────────────────────────
 const iniciar = {
-  data: new SlashCommandBuilder().setName('iniciar').setDescription('Posta (ou edita) os painéis centrais nos canais configurados.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  data: new SlashCommandBuilder()
+    .setName('iniciar')
+    .setDescription('Posta (ou edita) os painéis centrais nos canais configurados.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true })
     try {
       const { guild } = interaction
+
+      // Tickets
       const ticketsChannel = guild.channels.cache.get(CHANNEL_IDS.central_tickets)
       if (ticketsChannel) {
         const { buildCentralTicketsView } = require('../systems/tickets')
-        const ticketsPayload = await buildCentralTicketsView(guild)
-        await smartPost(ticketsChannel, ticketsPayload)
+        await smartPost(ticketsChannel, await buildCentralTicketsView(guild))
       }
+
+      // Registros + Membros (mesmo canal)
       const registrosChannel = guild.channels.cache.get(CHANNEL_IDS.central_registros)
       if (registrosChannel) {
         const { buildRegistrosV2 } = require('../systems/registros')
         const { buildMembrosV2 }   = require('../systems/membros')
-        // Posta painel de registros
         await smartPost(registrosChannel, buildRegistrosV2())
-        // Posta painel de membros no mesmo canal
         await smartPost(registrosChannel, buildMembrosV2())
       }
+
+      // Gerência (Components V2 — usa buildCentralGerenciaView)
       const gerenciaChannel = guild.channels.cache.get(CHANNEL_IDS.central_gerencia)
       if (gerenciaChannel) {
         const { buildCentralGerenciaView } = require('../systems/gerencia')
-        const gerenciaPayload = await buildCentralGerenciaView(guild)
-        await smartPost(gerenciaChannel, gerenciaPayload)
+        await smartPost(gerenciaChannel, await buildCentralGerenciaView(guild))
       }
+
       await interaction.editReply({ content: '✅ Painéis postados/atualizados com sucesso!' })
     } catch (err) {
       console.error('[/iniciar]', err)
-      if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: '❌ Erro ao iniciar painéis.', ephemeral: true })
+      if (!interaction.replied && !interaction.deferred)
+        return interaction.reply({ content: '❌ Erro ao iniciar painéis.', ephemeral: true })
       await interaction.editReply({ content: `❌ Erro: \`${err.message}\`` })
     }
   },
 }
 
+// ─── /atualizar-paineis ───────────────────────────────────────────────────────
 const atualizarPaineis = {
-  data: new SlashCommandBuilder().setName('atualizar-paineis').setDescription('Apaga e recria todos os painéis.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  data: new SlashCommandBuilder()
+    .setName('atualizar-paineis')
+    .setDescription('Apaga e recria todos os painéis.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true })
     try {
@@ -61,17 +80,19 @@ const atualizarPaineis = {
       // Tickets
       const ticketsChannel = guild.channels.cache.get(CHANNEL_IDS.central_tickets)
       if (ticketsChannel) {
-        const messages = await ticketsChannel.messages.fetch({ limit: 50 })
-        for (const [, msg] of messages.filter(m => m.author.id === client.user.id)) await msg.delete().catch(() => {})
+        const msgs = await ticketsChannel.messages.fetch({ limit: 50 })
+        for (const [, msg] of msgs.filter(m => m.author.id === client.user.id))
+          await msg.delete().catch(() => {})
         const { buildCentralTicketsView } = require('../systems/tickets')
         await ticketsChannel.send(await buildCentralTicketsView(guild))
       }
 
-      // Registros + Membros (mesmo canal)
+      // Registros + Membros
       const registrosChannel = guild.channels.cache.get(CHANNEL_IDS.central_registros)
       if (registrosChannel) {
-        const messages = await registrosChannel.messages.fetch({ limit: 50 })
-        for (const [, msg] of messages.filter(m => m.author.id === client.user.id)) await msg.delete().catch(() => {})
+        const msgs = await registrosChannel.messages.fetch({ limit: 50 })
+        for (const [, msg] of msgs.filter(m => m.author.id === client.user.id))
+          await msg.delete().catch(() => {})
         const { buildRegistrosV2 } = require('../systems/registros')
         const { buildMembrosV2 }   = require('../systems/membros')
         await registrosChannel.send(buildRegistrosV2())
@@ -81,8 +102,9 @@ const atualizarPaineis = {
       // Gerência
       const gerenciaChannel = guild.channels.cache.get(CHANNEL_IDS.central_gerencia)
       if (gerenciaChannel) {
-        const messages = await gerenciaChannel.messages.fetch({ limit: 50 })
-        for (const [, msg] of messages.filter(m => m.author.id === client.user.id)) await msg.delete().catch(() => {})
+        const msgs = await gerenciaChannel.messages.fetch({ limit: 50 })
+        for (const [, msg] of msgs.filter(m => m.author.id === client.user.id))
+          await msg.delete().catch(() => {})
         const { buildCentralGerenciaView } = require('../systems/gerencia')
         await gerenciaChannel.send(await buildCentralGerenciaView(guild))
       }
@@ -90,39 +112,50 @@ const atualizarPaineis = {
       await interaction.editReply({ content: '✅ Todos os painéis foram recriados!' })
     } catch (err) {
       console.error('[/atualizar-paineis]', err)
-      if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: '❌ Erro.', ephemeral: true })
+      if (!interaction.replied && !interaction.deferred)
+        return interaction.reply({ content: '❌ Erro.', ephemeral: true })
       await interaction.editReply({ content: `❌ Erro: \`${err.message}\`` })
     }
   },
 }
 
+// ─── /status-bot ─────────────────────────────────────────────────────────────
 const statusBot = {
-  data: new SlashCommandBuilder().setName('status-bot').setDescription('Exibe informações de status e saúde do bot.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  data: new SlashCommandBuilder()
+    .setName('status-bot')
+    .setDescription('Exibe informações de status e saúde do bot.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true })
     try {
       const { client } = interaction
       const moment     = require('moment-timezone')
       const uptimeSec  = Math.floor((client.uptime ?? 0) / 1000)
-      const hh = Math.floor(uptimeSec / 3600), mm = Math.floor((uptimeSec % 3600) / 60), ss = uptimeSec % 60
+      const hh = Math.floor(uptimeSec / 3600)
+      const mm = Math.floor((uptimeSec % 3600) / 60)
+      const ss = uptimeSec % 60
       const memUsed = process.memoryUsage()
-      const embed   = new EmbedBuilder()
+
+      const embed = new EmbedBuilder()
         .setTitle('🤖 Status do Bot MS-13')
         .setColor(COLOR_MS13)
         .addFields(
-          { name: '🟢 Uptime',          value: `${hh}h ${mm}m ${ss}s`,                         inline: true },
-          { name: '📡 Ping WebSocket',  value: `${client.ws.ping}ms`,                           inline: true },
-          { name: '🏠 Servidores',      value: `${client.guilds.cache.size}`,                   inline: true },
-          { name: '💾 Heap usado',      value: `${(memUsed.heapUsed / 1024 / 1024).toFixed(1)} MB`, inline: true },
-          { name: '📦 Node.js',         value: process.version,                                 inline: true },
-          { name: '🕒 Horário (BR)',    value: moment().tz('America/Sao_Paulo').format('DD/MM/YYYY HH:mm:ss'), inline: false },
+          { name: '🟢 Uptime',         value: `${hh}h ${mm}m ${ss}s`,                              inline: true },
+          { name: '📡 Ping WebSocket', value: `${client.ws.ping}ms`,                                inline: true },
+          { name: '🏠 Servidores',     value: `${client.guilds.cache.size}`,                        inline: true },
+          { name: '💾 Heap usado',     value: `${(memUsed.heapUsed / 1024 / 1024).toFixed(1)} MB`, inline: true },
+          { name: '📦 Node.js',        value: process.version,                                      inline: true },
+          { name: '🕒 Horário (BR)',   value: moment().tz('America/Sao_Paulo').format('DD/MM/YYYY HH:mm:ss'), inline: false },
         )
         .setFooter({ text: FOOTER_TEXT })
         .setTimestamp()
+
       await interaction.editReply({ embeds: [embed] })
     } catch (err) {
       console.error('[/status-bot]', err)
-      if (!interaction.replied && !interaction.deferred) return interaction.reply({ content: '❌ Erro.', ephemeral: true })
+      if (!interaction.replied && !interaction.deferred)
+        return interaction.reply({ content: '❌ Erro.', ephemeral: true })
       await interaction.editReply({ content: `❌ Erro: \`${err.message}\`` })
     }
   },

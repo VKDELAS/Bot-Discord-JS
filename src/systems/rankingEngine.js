@@ -69,6 +69,12 @@ function getDb() {
       max_chars   INTEGER DEFAULT 500,
       ordem       INTEGER DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS respostas_entrevista (
+      canal_id  TEXT PRIMARY KEY,
+      nome_ic   TEXT,
+      id_mta    TEXT
+    );
   `)
   return _db
 }

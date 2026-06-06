@@ -33,6 +33,8 @@ const customIds = [
   'rec_enviar_form', 'rec_aprovar_m', 'rec_reprovar_m', 'rec_blacklist',
   'rec_assumir', 'rec_renomear', 'rec_cancel_timer', 'rec_fechar',
   'modal_rec_fechar', 'modal_rec_renomear', 'modal_rec_aprovar', 'modal_rec_blacklist',
+  // Blacklist
+  'rec_blacklist_v14', 'rec_bl_adicionar', 'rec_bl_user_select', 'rec_bl_confirmar', 'rec_bl_cancelar',
 ]
 
 // ticketContextMap: canal.id → { tipo, openerTag, openerId, userMention, extraData }
@@ -252,21 +254,21 @@ function buildTicketButtons(tipo, aceito = false) {
   // ── SUPORTE / ELITE — após aceitar mostra só Fechar ───────────────────────
   if (aceito) {
     if (tipo === 'suporte' || tipo === 'elite') {
-      return new ActionRowBuilder().addComponents(
+      return [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
-      )
+      )]
     }
     // parceria — Assumido desabilitado + Fechar
-    return new ActionRowBuilder().addComponents(
+    return [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(cfg.aceitarId).setLabel('✅ Assumido').setStyle(ButtonStyle.Success).setDisabled(true),
       new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
-    )
+    )]
   }
 
-  return new ActionRowBuilder().addComponents(
+  return [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(cfg.aceitarId).setLabel('✅ Aceitar').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
-  )
+  )]
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -296,13 +298,23 @@ async function criarCanalTicket(guild, user, tipo) {
   const baseName  = user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20).replace(/-+$/, '') || 'usuario'
   const nomeCanal = `${prefixo}-${baseName}`
 
-  return guild.channels.create({
+  const canal = await guild.channels.create({
     name: nomeCanal,
     type: 0,
     parent: parentId,
     permissionOverwrites: permOverwrites,
     topic: `owner:${user.id} | Ticket ${tipo} — ${user.tag} | ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`,
   })
+
+  // Registra no DB para o ranking de atendentes
+  try {
+    const { getDb } = require('./rankingEngine.js')
+    getDb()
+      .prepare("INSERT OR IGNORE INTO atendimentos (canal_id, usuario_id, tipo, status) VALUES (?, ?, ?, 'aberto')")
+      .run(canal.id, user.id, tipo)
+  } catch {}
+
+  return canal
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -310,13 +322,13 @@ async function criarCanalTicket(guild, user, tipo) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function fecharTicket(interaction) {
-  const canal     = interaction.channel
-  const ctx       = ticketContextMap.get(canal.id)
+  const canal = interaction.channel
+  const ctx   = ticketContextMap.get(canal.id)
 
   const msgInicialBackup = {
     content: interaction.message.content,
-    embeds: interaction.message.embeds
-  };
+    embeds:  interaction.message.embeds,
+  }
 
   await interaction.deferUpdate()
 
@@ -325,6 +337,20 @@ async function fecharTicket(interaction) {
   } catch {}
 
   ticketContextMap.delete(canal.id)
+
+  // ✅ Fecha no DB e atualiza ranking de atendentes
+  try {
+    const { getDb, atualizarRanking } = require('./rankingEngine.js')
+    const db  = getDb()
+    const row = db.prepare("SELECT atendente_id FROM atendimentos WHERE canal_id=? AND status='aberto' LIMIT 1").get(canal.id)
+
+    db.prepare("UPDATE atendimentos SET status='fechado', fechado_em=datetime('now','localtime') WHERE canal_id=? AND status='aberto'")
+      .run(canal.id)
+
+    if (row?.atendente_id) {
+      atualizarRanking('atendentes', canal.guild).catch(() => {})
+    }
+  } catch (e) { console.error('[tickets] fecharTicket DB:', e) }
 
   await gerarEEnviarTranscript(canal, interaction.user, msgInicialBackup)
 
@@ -366,6 +392,22 @@ async function execute(interaction) {
             ),
           })
         }
+
+        // ✅ Verifica blacklist antes de criar o canal
+        try {
+          const { getDb } = require('./rankingEngine.js')
+          const naBl = getDb().prepare('SELECT motivo FROM blacklist WHERE user_id=?').get(user.id)
+          if (naBl) {
+            return interaction.editReply({
+              content: (
+                `# 🚫 Acesso Negado\n` +
+                `Você está na **blacklist** do recrutamento e não pode abrir um ticket.\n\n` +
+                `> ❌ **Motivo:** ${naBl.motivo}\n\n` +
+                `-# Entre em contato com a liderança caso acredite que isso seja um engano.`
+              ),
+            })
+          }
+        } catch {}
         const canal = await criarCanalTicket(guild, user, 'recrutamento')
         ticketContextMap.set(canal.id, { tipo: 'recrutamento', openerTag: user.tag, openerId: user.id, userMention: user.toString(), extraData: null })
         await canal.send({ content: buildRecContent(user.toString()), components: buildTicketButtons('recrutamento') })
@@ -521,6 +563,8 @@ async function execute(interaction) {
     'rec_enviar_form', 'rec_aprovar_m', 'rec_reprovar_m', 'rec_blacklist',
     'rec_assumir', 'rec_renomear', 'rec_cancel_timer', 'rec_fechar',
     'modal_rec_fechar', 'modal_rec_renomear', 'modal_rec_aprovar', 'modal_rec_blacklist',
+    'rec_blacklist_v14', 'rec_bl_adicionar', 'rec_bl_user_select', 'rec_bl_confirmar', 'rec_bl_cancelar',
+    'rec_confirmar_aprovacao', 'rec_cancelar_aprovacao',
   ]
   if (recIds.includes(id)) {
     const recrutamento = require('./recrutamento.js')
@@ -552,6 +596,14 @@ async function execute(interaction) {
     if (tipo === 'suporte')      novoContent = buildSuporteContent(userMention, extraData, interaction.user.toString())
     if (tipo === 'elite')        novoContent = buildEliteContent(userMention, extraData, interaction.user.toString())
     if (tipo === 'parceria')     novoContent = buildParceriaContent(userMention, extraData, interaction.user.toString())
+
+    // ✅ Grava atendente_id no DB para o ranking
+    try {
+      const { getDb } = require('./rankingEngine.js')
+      getDb()
+        .prepare("UPDATE atendimentos SET atendente_id=?, assumido_em=datetime('now','localtime') WHERE canal_id=? AND status='aberto'")
+        .run(interaction.user.id, canal.id)
+    } catch {}
 
     try {
       await interaction.deferUpdate()
