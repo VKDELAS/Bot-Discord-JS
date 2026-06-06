@@ -21,6 +21,8 @@ const customIds = [
   'cont_select_v13',
   'bl_sim_v14', 'bl_nao_v14',
   'modal_advertencia', 'modal_exoneracao',
+  // prefixo dinâmico — roteado via startsWith em interactionCreate (prefixo ger_)
+  // 'ger_exo_cont_'  ← tratado no bloco abaixo
 ]
 
 // ─── Contexto de fluxo multi-step ─────────────────────────────────────────────
@@ -225,10 +227,53 @@ async function execute(interaction) {
         'Clique em **Continuar** para preencher o motivo.',
       components: [
         new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('cont_select_v13').setLabel('Continuar').setStyle(ButtonStyle.Primary)
+          new ButtonBuilder().setCustomId(`ger_exo_cont_${targetId}`).setLabel('Continuar').setStyle(ButtonStyle.Primary)
         ),
       ],
     })
+  }
+
+  // ── Botão: Continuar Exoneração (customId dinâmico — targetId embutido) ──────
+  // Formato: ger_exo_cont_{targetId}
+  // Resolve o bug de "Contexto perdido" quando o Map some entre steps
+  if (customId.startsWith('ger_exo_cont_')) {
+    const embeddedTargetId = customId.slice('ger_exo_cont_'.length)
+
+    // Tenta recuperar targetTag do Map; se não tiver, busca o membro no Discord
+    let ctx = selectContextMap.get(interaction.user.id)
+    if (!ctx || ctx.type !== 'exo') {
+      // Map perdido (ex: bot reiniciou) — reconstrói contexto mínimo a partir do Discord
+      const target = await guild.members.fetch(embeddedTargetId).catch(() => null)
+      if (!target)
+        return interaction.reply({ content: '❌ Membro não encontrado. Reinicie o processo.', ephemeral: true })
+      ctx = { type: 'exo', targetId: embeddedTargetId, targetTag: target.user.tag }
+      selectContextMap.set(interaction.user.id, ctx)
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId('modal_exoneracao')
+      .setTitle('🚪 Exonerar Membro')
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('exo_motivo')
+          .setLabel('Motivo da exoneração')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(500)
+          .setPlaceholder('Descreva o motivo da exoneração...')
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('exo_prova')
+          .setLabel('Link da prova (opcional)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(300)
+          .setPlaceholder('https://imgur.com/...')
+      ),
+    )
+    return interaction.showModal(modal)
   }
 
   // ── Botão: Continuar → abre modal ─────────────────────────────────────────
@@ -264,32 +309,6 @@ async function execute(interaction) {
       return interaction.showModal(modal)
     }
 
-    if (ctx.type === 'exo') {
-      const modal = new ModalBuilder()
-        .setCustomId('modal_exoneracao')
-        .setTitle('🚪 Exonerar Membro')
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('exo_motivo')
-            .setLabel('Motivo da exoneração')
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true)
-            .setMaxLength(500)
-            .setPlaceholder('Descreva o motivo da exoneração...')
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('exo_prova')
-            .setLabel('Link da prova (opcional)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(false)
-            .setMaxLength(300)
-            .setPlaceholder('https://imgur.com/...')
-        ),
-      )
-      return interaction.showModal(modal)
-    }
   }
 
   // ── Modal: Advertência ────────────────────────────────────────────────────
