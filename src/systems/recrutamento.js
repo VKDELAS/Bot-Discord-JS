@@ -194,6 +194,7 @@ function buildPainelFormularioContainer() {
         new ButtonBuilder().setCustomId('rec_view_q').setLabel('👁 Ver').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('rec_refresh_q').setLabel('🔄 Atualizar').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('rec_export_q').setLabel('📤 Exportar').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('rec_import_q').setLabel('📥 Importar').setStyle(ButtonStyle.Primary),
       )
     )
     .addSeparatorComponents(new SeparatorBuilder())
@@ -846,6 +847,91 @@ async function execute(interaction) {
     })
   }
 
+  if (id === 'rec_import_q') {
+    return interaction.showModal(
+      new ModalBuilder()
+        .setCustomId('modal_rec_import_q')
+        .setTitle('📥 Importar Perguntas (JSON)')
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('json_perguntas')
+              .setLabel('Cole o JSON das perguntas aqui')
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+              .setPlaceholder('[{"id":1,"texto":"Pergunta?","obrigatoria":1,"max_chars":500,"ordem":1}]')
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('modo_import')
+              .setLabel('Modo: "substituir" ou "adicionar" (padrão: adicionar)')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(false)
+              .setPlaceholder('adicionar')
+          )
+        )
+    )
+  }
+
+  if (id === 'modal_rec_import_q') {
+    if (interaction.replied || interaction.deferred) return
+    await interaction.deferReply({ ephemeral: true })
+
+    let parsed
+    try {
+      const raw = interaction.fields.getTextInputValue('json_perguntas').trim()
+      parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) throw new Error('JSON deve ser um array')
+    } catch (e) {
+      return interaction.editReply({ content: `❌ JSON inválido: ${e.message}` })
+    }
+
+    const modoRaw = interaction.fields.getTextInputValue('modo_import').trim().toLowerCase()
+    const substituir = modoRaw === 'substituir'
+
+    const db = getDb()
+
+    if (substituir) {
+      db.prepare('DELETE FROM perguntas').run()
+    }
+
+    const ordemAtual = substituir
+      ? 0
+      : (db.prepare('SELECT MAX(ordem) AS m FROM perguntas').get()?.m ?? 0)
+
+    const stmt = db.prepare(
+      'INSERT INTO perguntas (texto, obrigatoria, max_chars, ordem) VALUES (?, ?, ?, ?)'
+    )
+
+    let importadas = 0
+    let erros = 0
+    for (let i = 0; i < parsed.length; i++) {
+      const p = parsed[i]
+      if (!p.texto) { erros++; continue }
+      const obrigatoria = p.obrigatoria !== undefined ? (p.obrigatoria ? 1 : 0) : 1
+      const maxChars    = Number(p.max_chars) || 500
+      const ordem       = ordemAtual + i + 1
+      try {
+        stmt.run(p.texto.trim(), obrigatoria, maxChars, ordem)
+        importadas++
+      } catch {
+        erros++
+      }
+    }
+
+    await interaction.editReply({
+      content: (
+        `✅ Importação concluída!\n\n` +
+        `> 📥 **Importadas:** ${importadas}\n` +
+        `> ⚠️ **Ignoradas (sem texto):** ${erros}\n` +
+        `> 📋 **Modo:** ${substituir ? 'Substituição total' : 'Adicionadas ao final'}\n\n` +
+        `-# IDs originais do JSON são ignorados — novos IDs são gerados automaticamente pelo banco.`
+      ),
+    })
+    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
+    return
+  }
+
   // ── Relatório ─────────────────────────────────────────────────────────────
   if (id === 'rec_gerar_rel_v14') {
     if (!isRecrutador(interaction.member))
@@ -1207,11 +1293,11 @@ async function execute(interaction) {
 const customIds = [
   'rec_fechar','rec_assumir','rec_renomear','rec_enviar_form','rec_cancel_timer',
   'rec_aprovar_m','rec_reprovar_m','rec_blacklist','rec_gerar_tkt',
-  'rec_add_q','rec_edit_q','rec_rem_q','rec_timer_q','rec_view_q','rec_refresh_q','rec_export_q',
+  'rec_add_q','rec_edit_q','rec_rem_q','rec_timer_q','rec_view_q','rec_refresh_q','rec_export_q','rec_import_q',
   'rec_select_rem_q','rec_gerar_rel_v14','rec_blacklist_v14',
   'sel_cand_v14','sel_rec_v14','rec_select_candidatos',
   'modal_rec_fechar','modal_rec_renomear','modal_rec_aprovar','modal_rec_blacklist',
-  'modal_rec_add_q','modal_rec_edit_q','modal_rec_relatorio',
+  'modal_rec_add_q','modal_rec_edit_q','modal_rec_relatorio','modal_rec_import_q',
 ]
 
 module.exports = {
