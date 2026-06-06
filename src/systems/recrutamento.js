@@ -4,7 +4,8 @@
 const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
-  StringSelectMenuBuilder, PermissionFlagsBits, ChannelType,
+  StringSelectMenuBuilder, UserSelectMenuBuilder,
+  PermissionFlagsBits, ChannelType,
   ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
   MediaGalleryBuilder, MediaGalleryItemBuilder, MessageFlags,
 } = require('discord.js')
@@ -261,6 +262,82 @@ function buildPainelBlacklist() {
   return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Embed de estatísticas gerais — fica fixo no canal, atualiza a cada aprovação
+// ─────────────────────────────────────────────────────────────────────────────
+function buildEstatisticasGerais() {
+  const db = getDb()
+
+  // Totais gerais (sem duplicação por candidato — conta o status final de cada um)
+  const totalAprov = db.prepare(
+    "SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE status='aprovado'"
+  ).get()?.c ?? 0
+
+  const totalRepr = db.prepare(
+    "SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE status='reprovado'"
+  ).get()?.c ?? 0
+
+  const totalGeral = totalAprov + totalRepr
+
+  // Top 3 recrutadores para dar um gostinho no embed geral
+  const top3 = db.prepare(
+    "SELECT recrutador_id, COUNT(DISTINCT candidato_id) AS total FROM recrutamentos WHERE status='aprovado' GROUP BY recrutador_id ORDER BY total DESC LIMIT 3"
+  ).all()
+
+  const top3Texto = top3.length === 0
+    ? '> *Nenhum recrutador com aprovações ainda.*'
+    : top3.map((r, i) => {
+        const medal = ['🥇', '🥈', '🥉'][i] ?? '🏅'
+        return `> ${medal} <@${r.recrutador_id}> — \`${r.total}\` aprovação${r.total !== 1 ? 'ões' : ''}`
+      }).join('\n')
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_REC)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 📊 ESTATÍSTICAS DE RECRUTAMENTO — MS-13'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 📈 Totais Gerais\n\n` +
+        `> ✅ **Aprovados:** \`${totalAprov}\`\n` +
+        `> ❌ **Reprovados:** \`${totalRepr}\`\n` +
+        `> 👥 **Total processado:** \`${totalGeral}\``
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 🏆 Top Recrutadores\n\n` + top3Texto
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `-# 🔄 Atualizado automaticamente • STATS_GERAIS • ${FOOTER_TEXT}`
+      )
+    )
+
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
+}
+
+async function atualizarEstatisticasGerais(guild) {
+  const ch = guild.channels.cache.get(REC_CHANNEL_IDS.relatorio_rec)
+  if (!ch) return
+  try {
+    const msgs     = await ch.messages.fetch({ limit: 50 })
+    const existing = msgs.find(m =>
+      m.author.id === guild.client.user.id &&
+      JSON.stringify(m.components).includes('STATS_GERAIS')
+    )
+    const payload = buildEstatisticasGerais()
+    if (existing) await existing.edit(payload).catch(() => null)
+    else await ch.send(payload).catch(() => null)
+  } catch { /* silencia erros de canal */ }
+}
+
 // compat
 function buildTopRecrutadores(guild) {
   return Promise.resolve(buildPayloadRankingRecrutadores(guild))
@@ -486,6 +563,8 @@ async function _aprovarMembro(interaction, nomeIC, idMTA) {
 
   // ✅ ATUALIZA RANKING EM TEMPO REAL
   await atualizarRanking('recrutadores', guild)
+  // ✅ ATUALIZA ESTATÍSTICAS GERAIS
+  await atualizarEstatisticasGerais(guild)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -969,27 +1048,74 @@ async function execute(interaction) {
   if (id === 'rec_gerar_rel_v14') {
     if (!isRecrutador(interaction.member))
       return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_relatorio').setTitle('Gerar Relatório').addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('obs').setLabel('Observações (opcional)').setStyle(TextInputStyle.Paragraph).setRequired(false)
-        )
-      )
-    )
-  }
-  if (id === 'modal_rec_relatorio') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const obs  = interaction.fields.getTextInputValue('obs').trim()
-    const uid  = interaction.user.id
-    const db   = getDb()
+
+    // Busca recrutadores que recrutaram pelo menos 1 pessoa
+    const recrutadoresComRec = getDb().prepare(
+      "SELECT DISTINCT recrutador_id FROM recrutamentos WHERE recrutador_id IS NOT NULL"
+    ).all().map(r => r.recrutador_id)
+
+    if (recrutadoresComRec.length === 0) {
+      return interaction.editReply({ content: '⚠️ Nenhum recrutador com recrutamentos registrados ainda.' })
+    }
+
+    // Filtra os que estão no servidor para montar as opções do select
+    const opcoes = []
+    for (const uid of recrutadoresComRec.slice(0, 25)) {
+      const membro = interaction.guild.members.cache.get(uid)
+        || await interaction.guild.members.fetch(uid).catch(() => null)
+      const nome = membro ? membro.displayName : `ID: ${uid}`
+      // Conta total deste recrutador
+      const total = getDb().prepare(
+        "SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=?"
+      ).get(uid)?.c ?? 0
+      opcoes.push({
+        label: nome.slice(0, 100),
+        description: `${total} recrutamento${total !== 1 ? 's' : ''} registrado${total !== 1 ? 's' : ''}`,
+        value: uid,
+      })
+    }
+
+    const container = new ContainerBuilder()
+      .setAccentColor(COLOR_REC)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          '# 📊 Gerar Relatório\n' +
+          '> Selecione o recrutador que deseja consultar.'
+        )
+      )
+      .addSeparatorComponents(new SeparatorBuilder())
+      .addActionRowComponents(
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('rec_rel_select_rec')
+            .setPlaceholder('👤 Selecione o recrutador...')
+            .addOptions(opcoes)
+        )
+      )
+
+    return interaction.editReply({ components: [container], flags: MessageFlags.IsComponentsV2 })
+  }
+
+  if (id === 'rec_rel_select_rec') {
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    if (interaction.replied || interaction.deferred) return
+    await interaction.deferReply({ ephemeral: true })
+
+    const uid    = interaction.values[0]
+    const db     = getDb()
+    const membro = interaction.guild.members.cache.get(uid)
+      || await interaction.guild.members.fetch(uid).catch(() => null)
+    const nomeDisplay = membro ? membro.displayName : `<@${uid}>`
 
     // Busca todos os recrutados deste recrutador com seus status
     const recrutados = db.prepare(
       "SELECT candidato_id, status, fechado_em FROM recrutamentos WHERE recrutador_id=? ORDER BY fechado_em DESC"
     ).all(uid)
 
-    // Filtra aprovados e reprovados (sem duplicação por candidato — pega o mais recente)
+    // Sem duplicação por candidato — considera o registro mais recente
     const vistosCandidatos = new Set()
     const aprovados  = []
     const reprovados = []
@@ -1003,43 +1129,28 @@ async function execute(interaction) {
     const totalAprov = aprovados.length
     const totalRepr  = reprovados.length
 
-    // Monta a lista de aprovados com menção
-    let listaAprovadosTexto = ''
-    if (aprovados.length === 0) {
-      listaAprovadosTexto = '> *Nenhum aprovado ainda.*'
-    } else {
-      listaAprovadosTexto = aprovados
-        .map((r, i) => `> **${i + 1}.** <@${r.candidato_id}>`)
-        .join('\n')
-    }
+    const listaAprovadosTexto = aprovados.length === 0
+      ? '> *Nenhum aprovado ainda.*'
+      : aprovados.map((r, i) => `> **${i + 1}.** <@${r.candidato_id}>`).join('\n')
 
-    // Monta lista de reprovados
-    let listaReprovadosTexto = ''
-    if (reprovados.length === 0) {
-      listaReprovadosTexto = '> *Nenhum reprovado.*'
-    } else {
-      listaReprovadosTexto = reprovados
-        .map((r, i) => `> **${i + 1}.** <@${r.candidato_id}>`)
-        .join('\n')
-    }
+    const listaReprovadosTexto = reprovados.length === 0
+      ? '> *Nenhum reprovado.*'
+      : reprovados.map((r, i) => `> **${i + 1}.** <@${r.candidato_id}>`).join('\n')
 
-    // Container principal — Components V2
     const box = new ContainerBuilder()
       .setAccentColor(COLOR_REC)
       .addMediaGalleryComponents(
         new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_RELATORIO))
       )
       .addSeparatorComponents(new SeparatorBuilder())
-      // Cabeçalho com nome do recrutador
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
           `# 📊 RELATÓRIO DE RECRUTAMENTO\n` +
-          `> 👤 **Recrutador:** <@${uid}> — **${interaction.user.displayName}**\n` +
+          `> 👤 **Recrutador:** <@${uid}> — **${nomeDisplay}**\n` +
           `> 📅 **Gerado em:** ${agora()}`
         )
       )
       .addSeparatorComponents(new SeparatorBuilder())
-      // Resumo numérico
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
           `## 📈 Resumo\n\n` +
@@ -1048,32 +1159,17 @@ async function execute(interaction) {
         )
       )
       .addSeparatorComponents(new SeparatorBuilder())
-      // Lista de aprovados
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
           `## ✅ Aprovados (${totalAprov})\n\n` + listaAprovadosTexto
         )
       )
       .addSeparatorComponents(new SeparatorBuilder())
-      // Lista de reprovados
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
           `## ❌ Reprovados (${totalRepr})\n\n` + listaReprovadosTexto
         )
       )
-
-    // Observações — só adiciona o bloco se tiver algo
-    if (obs) {
-      box
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent(
-            `## 📝 Observações\n\n> ${obs}`
-          )
-        )
-    }
-
-    box
       .addSeparatorComponents(new SeparatorBuilder())
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent(`-# 📊 Relatório de Recrutamento • ${FOOTER_TEXT}`)
@@ -1081,8 +1177,70 @@ async function execute(interaction) {
 
     const relCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.relatorio_rec)
     const logCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.logs_relatorios_rec)
-    if (relCh) await relCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
-    if (logCh) await logCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
+
+    // Canal relatorio_rec — posta e apaga após 5 minutos
+    if (relCh) {
+      relCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 })
+        .then(msg => setTimeout(() => msg.delete().catch(() => null), 5 * 60 * 1000))
+        .catch(() => null)
+    }
+
+    // Canal de logs — apaga embed antigo do mesmo recrutador (se existir) e manda novo no final
+    if (logCh) {
+      try {
+        const logMsgs = await logCh.messages.fetch({ limit: 100 })
+        // Identificador único por recrutador no footer: REC_LOG_${uid}
+        const antiga = logMsgs.find(m =>
+          m.author.id === interaction.client.user.id &&
+          JSON.stringify(m.components).includes(`REC_LOG_${uid}`)
+        )
+        if (antiga) await antiga.delete().catch(() => null)
+      } catch { /* silencia */ }
+
+      // Rebuild do box com identificador do recrutador no footer
+      const boxLog = new ContainerBuilder()
+        .setAccentColor(COLOR_REC)
+        .addMediaGalleryComponents(
+          new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_RELATORIO))
+        )
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `# 📊 RELATÓRIO DE RECRUTAMENTO\n` +
+            `> 👤 **Recrutador:** <@${uid}> — **${nomeDisplay}**\n` +
+            `> 📅 **Gerado em:** ${agora()}`
+          )
+        )
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `## 📈 Resumo\n\n` +
+            `> ✅ **Aprovados:** \`${totalAprov}\`\n` +
+            `> ❌ **Reprovados:** \`${totalRepr}\``
+          )
+        )
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `## ✅ Aprovados (${totalAprov})\n\n` + listaAprovadosTexto
+          )
+        )
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `## ❌ Reprovados (${totalRepr})\n\n` + listaReprovadosTexto
+          )
+        )
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `-# 📊 Relatório de Recrutamento • REC_LOG_${uid} • ${FOOTER_TEXT}`
+          )
+        )
+
+      await logCh.send({ components: [boxLog], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
+    }
+
     return interaction.editReply({ content: '✅ Relatório gerado e enviado no canal!' })
   }
 
@@ -1402,12 +1560,12 @@ const customIds = [
   'rec_fechar','rec_assumir','rec_renomear','rec_enviar_form','rec_cancel_timer',
   'rec_aprovar_m','rec_reprovar_m','rec_blacklist','rec_gerar_tkt',
   'rec_add_q','rec_edit_q','rec_rem_q','rec_timer_q','rec_view_q','rec_refresh_q','rec_export_q','rec_import_q',
-  'rec_select_rem_q','rec_gerar_rel_v14','rec_blacklist_v14',
+  'rec_select_rem_q','rec_gerar_rel_v14','rec_rel_select_rec','rec_blacklist_v14',
   'rec_bl_adicionar','rec_bl_user_select','rec_bl_confirmar','rec_bl_cancelar',
   'rec_bl_remover','rec_bl_remover_select','rec_bl_remover_confirmar',
   'sel_cand_v14','sel_rec_v14','rec_select_candidatos',
   'modal_rec_fechar','modal_rec_renomear','modal_rec_aprovar','modal_rec_blacklist',
-  'modal_rec_add_q','modal_rec_edit_q','modal_rec_relatorio','modal_rec_import_q',
+  'modal_rec_add_q','modal_rec_edit_q','modal_rec_import_q',
 ]
 
 module.exports = {
@@ -1422,5 +1580,7 @@ module.exports = {
   buildTopRecrutadoresVazio,
   buildTicketAberturaContainer,
   buildRecContent,
+  buildEstatisticasGerais,
+  atualizarEstatisticasGerais,
   atualizarRankingRecrutadores: (guild) => atualizarRanking('recrutadores', guild),
 }

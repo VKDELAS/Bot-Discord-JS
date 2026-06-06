@@ -85,12 +85,14 @@ const enviarMsgsRec = {
         buildPainelFormularioContainer,
         buildPainelRelatorio,
         buildPainelBlacklist,
+        buildEstatisticasGerais,
       } = require('../systems/recrutamento')
 
       const paineis = [
-        { id: REC_CHANNEL_IDS.painel_formulario, builder: () => buildPainelFormularioContainer(), key: 'PAINEL_FORM',  nome: 'Formulário'  },
-        { id: REC_CHANNEL_IDS.relatorio_rec,     builder: () => buildPainelRelatorio(),           key: 'Relatórios',   nome: 'Relatório'   },
-        { id: REC_CHANNEL_IDS.blacklist,          builder: () => buildPainelBlacklist(),           key: 'Blacklist',    nome: 'Blacklist'   },
+        { id: REC_CHANNEL_IDS.painel_formulario, builder: () => buildPainelFormularioContainer(), key: 'PAINEL_FORM',  nome: 'Formulário'         },
+        { id: REC_CHANNEL_IDS.relatorio_rec,     builder: () => buildEstatisticasGerais(),        key: 'STATS_GERAIS', nome: 'Estatísticas Gerais' },
+        { id: REC_CHANNEL_IDS.relatorio_rec,     builder: () => buildPainelRelatorio(),           key: 'Relatórios',   nome: 'Painel Relatório'    },
+        { id: REC_CHANNEL_IDS.blacklist,          builder: () => buildPainelBlacklist(),           key: 'Blacklist',    nome: 'Blacklist'            },
       ]
 
       const linhas = []
