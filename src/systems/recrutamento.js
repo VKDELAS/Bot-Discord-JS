@@ -1,272 +1,497 @@
-// src/systems/recrutamento.js — Etapa 7
+// src/systems/recrutamento.js
 'use strict'
 
 const {
-  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
   StringSelectMenuBuilder, PermissionFlagsBits, ChannelType,
+  ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
+  MediaGalleryBuilder, MediaGalleryItemBuilder, MessageFlags,
 } = require('discord.js')
-const Database = require('better-sqlite3')
-const fs       = require('fs')
-const path     = require('path')
-const moment   = require('moment-timezone')
 
-const BR_TZ       = 'America/Sao_Paulo'
-const COLOR_MS13    = 0x0000FF
-const COLOR_SUCCESS = 0x2ECC71
-const COLOR_ERROR   = 0xE74C3C
-const COLOR_WARNING = 0xF39C12
-const COLOR_INFO    = 0x3498DB
-const COLOR_REC     = 0x9B59B6
-const FOOTER_TEXT   = 'MS-13 Roleplay © Todos os direitos reservados'
+const {
+  ROLES, ROLE_IDS, MS13_ROLE_ID, CHANNEL_IDS,
+  COLOR_MS13, COLOR_SUCCESS, COLOR_ERROR, COLOR_REC,
+  FOOTER_TEXT, REC_CHANNEL_IDS, _PERM_TICKET_ROLE_ID,
+} = require('../config/settings.js')
 
-const ROLE_IDS = {
-  lider:      '1469085061373628437',
-  sub_lider:  '1471295287896178892',
-  recrutador: '1469085227757605002',
-  membro:     '1471295722937647239',
-  meta_paga:  '1486403263657152674',
-  etapa2:     '1469086279613288741',
-}
-const ROLES = {
-  isento: ['1469085061373628437','1471295287896178892','1469085227757605002','1469085338046697572','1469085446108741780','1469131886533017671'],
-}
-const MS13_ROLE_ID = '1469085564920795371'
-const CHANNEL_IDS  = { logs_recrutamento: '1483674983887667250' }
-const REC_CHANNEL_IDS = {
-  painel_formulario:   '1488347348756332685',
-  relatorio_rec:       '1488347471230013510',
-  recrutadores:        '1488347411784007690',
-  top_tickets:         '1488347411784007690',
-  blacklist:           '1488347509599502356',
-  logs_relatorios_rec: '1492865227908317324',
-  categoria_rec:       '0',
-}
-const _PERM_TICKET_ROLE_ID = '1478161626187432077'
-const REC_DB = 'ms13_recrutamento.db'
+const {
+  getDb, agora,
+  atualizarRanking,
+  buildPayloadRankingRecrutadores,
+  buildPayloadRankingRecrutadoresVazio,
+} = require('./rankingEngine.js')
 
-// ── DB ────────────────────────────────────────────────────────────────────────
-let _db = null
-function getDb() {
-  if (!_db) {
-    _db = new Database(REC_DB)
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS recrutamentos (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        candidato_id  TEXT NOT NULL,
-        recrutador_id TEXT,
-        ticket_id     TEXT,
-        status        TEXT DEFAULT 'aberto',
-        criado_em     TEXT DEFAULT (datetime('now','localtime')),
-        fechado_em    TEXT
-      );
-      CREATE TABLE IF NOT EXISTS blacklist (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id       TEXT NOT NULL UNIQUE,
-        motivo        TEXT,
-        adicionado_por TEXT,
-        adicionado_em  TEXT DEFAULT (datetime('now','localtime'))
-      );
-      CREATE TABLE IF NOT EXISTS perguntas (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        texto       TEXT NOT NULL,
-        obrigatoria INTEGER DEFAULT 1,
-        max_chars   INTEGER DEFAULT 500,
-        ordem       INTEGER DEFAULT 0
-      );
-    `)
-  }
-  return _db
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Constantes visuais
+// ─────────────────────────────────────────────────────────────────────────────
+const BANNER_REC = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449213932503130/banner_rec.png?ex=6a242198&is=6a22d018&hm=cc997879c7a773d6dc2aa147c5b01c9f6bd0a9e68d59b7772f068733f6cb4e2b&'
+const BANNER_RELATORIO = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449211675705455/banner_relatorio_de_rec.png?ex=6a242198&is=6a22d018&hm=7c6ac939810e4aac185f4563d05e4573ae325d39dca7749317446a6d662f5889&'
+const BANNER_BLACKLIST  = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449213261156402/Banner_blacklist.png?ex=6a242198&is=6a22d018&hm=01e46996d5da34d6764892d4aa185d2e3e23711bf657b74f52044f12bb3eb120&'
+const BANNER_FORMULARIO = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512454181313839257/Banner_Painel_formulario.png?ex=6a242638&is=6a22d4b8&hm=b6f6c22387111be74771f0cbb0bf9de465e728eddfe27476ac86f65c26f84c9f&'
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers de permissão
+// ─────────────────────────────────────────────────────────────────────────────
 function isStaff(member)      { return ROLES.isento.some(id => member.roles.cache.has(id)) }
 function isRecrutador(member) { return member.roles.cache.has(ROLE_IDS.recrutador) || isStaff(member) }
-function agora()              { return moment().tz(BR_TZ).format('DD/MM/YYYY HH:mm') }
-function footerEmbed()        { return { text: FOOTER_TEXT } }
 
-// ── Views ─────────────────────────────────────────────────────────────────────
-function buildTicketRecView() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('rec_fechar').setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('rec_assumir').setLabel('✋ Assumir').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('rec_renomear').setLabel('✏️ Renomear').setStyle(ButtonStyle.Secondary),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('rec_enviar_form').setLabel('📋 Enviar Formulário').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('rec_cancel_timer').setLabel('⏹ Cancelar Timer').setStyle(ButtonStyle.Secondary),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('rec_aprovar_m').setLabel('✅ Aprovar').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('rec_reprovar_m').setLabel('❌ Reprovar').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('rec_blacklist').setLabel('🚫 Blacklist').setStyle(ButtonStyle.Danger),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('rec_gerar_tkt').setLabel('🎫 Gerar Ticket').setStyle(ButtonStyle.Primary),
-    ),
-  ]
+// ─────────────────────────────────────────────────────────────────────────────
+// DB helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function getTicketAberto(candidatoId) {
+  return getDb()
+    .prepare("SELECT * FROM recrutamentos WHERE candidato_id=? AND status='aberto' LIMIT 1")
+    .get(candidatoId)
 }
 
-function buildPainelFormularioView() {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('rec_add_q').setLabel('➕ Adicionar').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('rec_edit_q').setLabel('✏️ Editar').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('rec_rem_q').setLabel('🗑 Remover').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('rec_timer_q').setLabel('⏱ Timer').setStyle(ButtonStyle.Secondary),
-    ),
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('rec_view_q').setLabel('👁 Ver Perguntas').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('rec_refresh_q').setLabel('🔄 Atualizar').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('rec_export_q').setLabel('📤 Exportar').setStyle(ButtonStyle.Secondary),
-    ),
-  ]
+function jaFoiAprovado(candidatoId) {
+  return !!getDb()
+    .prepare("SELECT id FROM recrutamentos WHERE candidato_id=? AND status='aprovado' LIMIT 1")
+    .get(candidatoId)
 }
 
-// ── Embeds ────────────────────────────────────────────────────────────────────
-function buildPainelFormularioEmbed() {
-  const db        = getDb()
-  const perguntas = db.prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
-  return new EmbedBuilder()
-    .setColor(COLOR_REC)
-    .setTitle('📋 Painel de Formulário — Recrutamento')
-    .setDescription(
-      perguntas.length === 0
-        ? '*Nenhuma pergunta cadastrada ainda.*'
-        : perguntas.map((p, i) => `**${i + 1}.** ${p.texto}\n> Obrigatória: ${p.obrigatoria ? 'Sim' : 'Não'} | Máx: ${p.max_chars} chars`).join('\n\n')
+// ─────────────────────────────────────────────────────────────────────────────
+// Painel principal do canal de recrutadores
+// ─────────────────────────────────────────────────────────────────────────────
+function buildPainelRecrutamento() {
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_MS13)
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(
+        new MediaGalleryItemBuilder().setURL(BANNER_REC)
+      )
     )
-    .setFooter({ text: 'PAINEL_FORM — ' + FOOTER_TEXT })
-    .setTimestamp()
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 🔫 RECRUTAMENTO — MS-13\n' +
+        '> Sistema oficial de seleção de novos membros da facção.\n' +
+        '> Use os painéis abaixo para gerenciar candidatos e acompanhar o ranking.'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '## 📋 Como funciona\n\n' +
+        '> **1.** Um ticket é aberto quando um candidato entra no processo.\n' +
+        '> **2.** Um recrutador assume e conduz a entrevista.\n' +
+        '> **3.** Após a entrevista, use **Aprovar** ou **Reprovar**.\n' +
+        '> **4.** Aprovações são contabilizadas no ranking em tempo real.'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Recrutamento`)
+    )
+
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
-function buildPainelFormulario() {
-  return { embeds: [buildPainelFormularioEmbed()], components: buildPainelFormularioView() }
+// ─────────────────────────────────────────────────────────────────────────────
+// Mensagem inicial do ticket de recrutamento
+// ─────────────────────────────────────────────────────────────────────────────
+function buildTicketAberturaContainer(candidatoId, abertoEm) {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('rec_fechar').setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('rec_assumir').setLabel('✋ Assumir').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('rec_renomear').setLabel('✏️ Renomear').setStyle(ButtonStyle.Secondary),
+  )
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('rec_enviar_form').setLabel('📋 Formulário').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('rec_cancel_timer').setLabel('⏹ Cancelar Timer').setStyle(ButtonStyle.Secondary),
+  )
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('rec_aprovar_m').setLabel('✅ Aprovar').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('rec_reprovar_m').setLabel('❌ Reprovar').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('rec_blacklist').setLabel('🚫 Blacklist').setStyle(ButtonStyle.Danger),
+  )
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_REC)
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(
+        new MediaGalleryItemBuilder().setURL(BANNER_REC)
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 🎫 TICKET DE RECRUTAMENTO\n\n' +
+        `> **Candidato:** <@${candidatoId}>\n` +
+        `> **Responsável:** Aguardando recrutador\n` +
+        `> **Aberto em:** ${abertoEm}\n` +
+        '> **Status:** 🟡 Aguardando atendimento'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '## ⚙️ Ações\n' +
+        '> Use os botões para gerenciar este ticket.\n' +
+        '> ⚠️ A aprovação credita automaticamente no ranking.'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addActionRowComponents(row1)
+    .addActionRowComponents(row2)
+    .addActionRowComponents(row3)
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Ticket de Recrutamento`)
+    )
+
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Painel de formulário
+// ─────────────────────────────────────────────────────────────────────────────
+function buildPainelFormularioContainer() {
+  const perguntas = getDb().prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
+
+  const listaTexto = perguntas.length === 0
+    ? '> *Nenhuma pergunta cadastrada ainda.*'
+    : perguntas.map((p, i) =>
+        `> **${i + 1}.** [ID: \`${p.id}\`] ${p.texto}\n` +
+        `> ↳ Obrigatória: ${p.obrigatoria ? '✅' : '❌'} | Máx: ${p.max_chars} chars`
+      ).join('\n\n')
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_REC)
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_FORMULARIO))
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 📋 PAINEL DE FORMULÁRIO\n' +
+        '> Gerencie as perguntas utilizadas nas entrevistas de recrutamento.'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 📝 Perguntas Cadastradas (${perguntas.length})\n\n` + listaTexto
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rec_add_q').setLabel('➕ Adicionar').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('rec_edit_q').setLabel('✏️ Editar').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('rec_rem_q').setLabel('🗑 Remover').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('rec_timer_q').setLabel('⏱ Timer').setStyle(ButtonStyle.Secondary),
+      )
+    )
+    .addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rec_view_q').setLabel('👁 Ver').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('rec_refresh_q').setLabel('🔄 Atualizar').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('rec_export_q').setLabel('📤 Exportar').setStyle(ButtonStyle.Secondary),
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent('-# PAINEL_FORM — ' + FOOTER_TEXT)
+    )
+
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
+}
+
+function buildPainelFormulario() { return buildPainelFormularioContainer() }
 
 function buildPainelRelatorio() {
-  return { embeds: [new EmbedBuilder().setColor(COLOR_REC).setTitle('📊 Relatório de Recrutamento').setDescription('Use o botão abaixo para gerar seu relatório.').setFooter(footerEmbed()).setTimestamp()], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('rec_gerar_rel_v14').setLabel('📊 Gerar Relatório').setStyle(ButtonStyle.Primary))] }
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_REC)
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_RELATORIO))
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 📊 RELATÓRIO DE RECRUTAMENTO\n' +
+        '> Gere o relatório de aprovações do seu usuário.'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rec_gerar_rel_v14').setLabel('📊 Gerar Relatório').setStyle(ButtonStyle.Primary)
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Relatórios`)
+    )
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
 function buildPainelBlacklist() {
-  return { embeds: [new EmbedBuilder().setColor(COLOR_ERROR).setTitle('🚫 Blacklist — Recrutamento').setDescription('Lista de usuários banidos do processo seletivo.').setFooter(footerEmbed()).setTimestamp()], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('rec_blacklist_v14').setLabel('👁 Ver Blacklist').setStyle(ButtonStyle.Danger))] }
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_ERROR)
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_BLACKLIST))
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 🚫 BLACKLIST — RECRUTAMENTO\n' +
+        '> Usuários impedidos de participar do processo seletivo.'
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rec_blacklist_v14').setLabel('👁 Ver Blacklist').setStyle(ButtonStyle.Danger)
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Blacklist`)
+    )
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
-async function buildTopRecrutadores(guild) {
-  const db    = getDb()
-  const dados = db.prepare(`SELECT recrutador_id, COUNT(*) as total FROM recrutamentos WHERE recrutador_id IS NOT NULL AND status = 'aprovado' GROUP BY recrutador_id ORDER BY total DESC LIMIT 10`).all()
-  return { embeds: [new EmbedBuilder().setColor(COLOR_REC).setTitle('🏆 Ranking de Recrutadores').setDescription(dados.length === 0 ? '*Nenhum recrutamento aprovado ainda.*' : dados.map((d, i) => { const m = guild.members.cache.get(d.recrutador_id); return `**${i + 1}.** ${m ? m.displayName : `<@${d.recrutador_id}>`} — ${d.total} aprovação(ões)` }).join('\n')).setFooter({ text: 'TKT_RANK — ' + FOOTER_TEXT }).setTimestamp()] }
+// compat
+function buildTopRecrutadores(guild) {
+  return Promise.resolve(buildPayloadRankingRecrutadores(guild))
 }
-
-async function buildTopRecrutadoresVazio() {
-  return { embeds: [new EmbedBuilder().setColor(COLOR_REC).setTitle('🏆 Ranking de Recrutadores').setDescription('*Ranking resetado. Nenhum recrutamento registrado.*').setFooter({ text: 'TKT_RANK — ' + FOOTER_TEXT }).setTimestamp()] }
+function buildTopRecrutadoresVazio() {
+  return Promise.resolve(buildPayloadRankingRecrutadoresVazio())
 }
-
 function buildRecContent(userMention, responsavel) {
   return `## 🎫 Ticket de Recrutamento\n> **Candidato:** ${userMention}\n> **Responsável:** ${responsavel || 'Aguardando'}\n> **Aberto em:** ${agora()}`
 }
 
-// ── Ranking ───────────────────────────────────────────────────────────────────
-let _rankingEmAndamento = false
-async function atualizarRankingRecrutadores(guild) {
-  if (_rankingEmAndamento) return
-  _rankingEmAndamento = true
-  try {
-    const payload = await buildTopRecrutadores(guild)
-    const channel = guild.channels.cache.get(REC_CHANNEL_IDS.recrutadores)
-    if (!channel) return
-    const messages = await channel.messages.fetch({ limit: 20 })
-    const existing = messages.find(m => m.author.id === guild.client.user.id && m.embeds[0]?.footer?.text?.includes('TKT_RANK'))
-    if (existing) await existing.edit(payload)
-    else await channel.send(payload)
-  } catch (err) { console.error('[REC] Erro ao atualizar ranking:', err) }
-  finally { _rankingEmAndamento = false }
+// ─────────────────────────────────────────────────────────────────────────────
+// Atualiza painel do formulário no canal
+// ─────────────────────────────────────────────────────────────────────────────
+async function _atualizarPainelFormulario(guild, clientId) {
+  const ch = guild.channels.cache.get(REC_CHANNEL_IDS.painel_formulario)
+  if (!ch) return
+  const msgs = await ch.messages.fetch({ limit: 20 })
+  const msg  = msgs.find(m => m.author.id === clientId && JSON.stringify(m.components).includes('PAINEL_FORM'))
+  if (msg) await msg.edit(buildPainelFormularioContainer()).catch(() => null)
 }
 
-// ── Entrevista ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Entrevista sequencial
+// ─────────────────────────────────────────────────────────────────────────────
 async function _conduzirEntrevista(channel, candidatoId) {
-  const db        = getDb()
-  const perguntas = db.prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
-  if (perguntas.length === 0) { await channel.send('⚠️ Nenhuma pergunta cadastrada.'); return null }
+  const perguntas = getDb().prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
+  if (perguntas.length === 0) {
+    await channel.send({ content: '⚠️ Nenhuma pergunta cadastrada no formulário.' })
+    return null
+  }
+
   const respostas = []
-  for (const pergunta of perguntas) {
-    await channel.send({ embeds: [new EmbedBuilder().setColor(COLOR_INFO).setDescription(`❓ **${pergunta.texto}**\n\n> Responda abaixo. Você tem **5 minutos**.`).setFooter({ text: `Pergunta ${perguntas.indexOf(pergunta) + 1}/${perguntas.length}` })] })
+  for (let idx = 0; idx < perguntas.length; idx++) {
+    const p = perguntas[idx]
+    const qBox = new ContainerBuilder()
+      .setAccentColor(COLOR_REC)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `## ❓ Pergunta ${idx + 1}/${perguntas.length}\n\n> ${p.texto}\n\n> Responda abaixo. Você tem **5 minutos**.`
+        )
+      )
+    await channel.send({ components: [qBox], flags: MessageFlags.IsComponentsV2 })
+
     try {
-      const coletadas = await channel.awaitMessages({ filter: m => m.author.id === candidatoId, max: 1, time: 300_000, errors: ['time'] })
-      const resposta  = coletadas.first().content.trim()
-      if (pergunta.obrigatoria && resposta.length === 0) { await channel.send('❌ Pergunta obrigatória. Entrevista encerrada.'); return null }
-      if (resposta.length > pergunta.max_chars) { await channel.send(`❌ Resposta muito longa (máx. ${pergunta.max_chars} chars). Encerrada.`); return null }
-      respostas.push({ pergunta: pergunta.texto, resposta })
-    } catch { await channel.send('⏰ Tempo esgotado. Entrevista encerrada.'); return null }
+      const coletadas = await channel.awaitMessages({
+        filter: m => m.author.id === candidatoId,
+        max: 1, time: 300_000, errors: ['time'],
+      })
+      const r = coletadas.first().content.trim()
+      if (p.obrigatoria && !r) { await channel.send('❌ Pergunta obrigatória não respondida. Entrevista encerrada.'); return null }
+      if (r.length > p.max_chars) { await channel.send(`❌ Resposta muito longa (máx. ${p.max_chars} chars). Encerrado.`); return null }
+      respostas.push({ pergunta: p.texto, resposta: r })
+    } catch {
+      await channel.send('⏰ Tempo esgotado. Entrevista encerrada automaticamente.')
+      return null
+    }
   }
   return respostas
 }
 
-// ── Aprovar membro ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Aprovar membro — atualiza ranking ao final
+// ─────────────────────────────────────────────────────────────────────────────
 async function _aprovarMembro(interaction, nomeIC, idMTA) {
-  const guild  = interaction.guild
-  const ticket = interaction.channel
-  const candidatoId = ticket.topic?.match(/\d{17,19}/)?.[0]
-  if (!candidatoId) return interaction.reply({ content: '❌ Candidato não identificado.', ephemeral: true })
+  const guild       = interaction.guild
+  const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
+
+  if (!candidatoId) return interaction.editReply({ content: '❌ Candidato não identificado no tópico do canal.' })
+
+  // ✅ Bloqueio anti-duplicação
+  if (jaFoiAprovado(candidatoId)) {
+    return interaction.editReply({
+      content: `⚠️ <@${candidatoId}> **já foi aprovado anteriormente.** Ação bloqueada para evitar duplicação no ranking.`,
+    })
+  }
+
   const member = await guild.members.fetch(candidatoId).catch(() => null)
-  if (!member) return interaction.reply({ content: '❌ Candidato não encontrado.', ephemeral: true })
+  if (!member) return interaction.editReply({ content: '❌ Candidato não encontrado no servidor.' })
+
   const novoNick = `Ⓜ・ ${nomeIC} ${idMTA}`
-  try { await member.setNickname(novoNick) } catch { await interaction.followUp({ content: '⚠️ Não foi possível alterar o nick.', ephemeral: true }) }
-  await member.roles.add([ROLE_IDS.etapa2, ROLE_IDS.membro, MS13_ROLE_ID]).catch(() => null)
+  const erros = []
+
+  await member.setNickname(novoNick).catch(e => erros.push(`nick: ${e.message}`))
+
+  const rolesAdicionar = [ROLE_IDS.etapa2, ROLE_IDS.membro, MS13_ROLE_ID].filter(Boolean)
+  await member.roles.add(rolesAdicionar).catch(e => erros.push(`cargo: ${e.message}`))
+
   const db = getDb()
-  db.prepare(`UPDATE recrutamentos SET status = 'aprovado', fechado_em = datetime('now','localtime') WHERE candidato_id = ? AND status = 'aberto'`).run(candidatoId)
+  const res = db.prepare(`
+    UPDATE recrutamentos
+    SET status='aprovado', recrutador_id=?, fechado_em=datetime('now','localtime')
+    WHERE candidato_id=? AND status='aberto'
+  `).run(interaction.user.id, candidatoId)
+
+  // Edge case: ticket aberto fora do sistema normal
+  if (res.changes === 0) {
+    db.prepare(`
+      INSERT INTO recrutamentos (candidato_id, recrutador_id, ticket_id, status, fechado_em)
+      VALUES (?, ?, ?, 'aprovado', datetime('now','localtime'))
+    `).run(candidatoId, interaction.user.id, interaction.channel.id)
+  }
+
+  // Log
   const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_recrutamento)
-  if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setColor(COLOR_SUCCESS).setTitle('✅ Membro Aprovado').addFields({ name: 'Candidato', value: `<@${candidatoId}>`, inline: true }, { name: 'Aprovado por', value: `<@${interaction.user.id}>`, inline: true }, { name: 'Nick', value: novoNick, inline: true }, { name: 'Data', value: agora(), inline: true }).setFooter(footerEmbed())] })
-  await interaction.reply({ embeds: [new EmbedBuilder().setColor(COLOR_SUCCESS).setTitle('✅ Membro aprovado!').setDescription(`${member} foi aprovado como **Morador** da MS-13.`).setFooter(footerEmbed())] })
-  await atualizarRankingRecrutadores(guild)
+  if (logCh) {
+    const logBox = new ContainerBuilder()
+      .setAccentColor(COLOR_SUCCESS)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          '## ✅ NOVO MEMBRO APROVADO\n\n' +
+          `> **Candidato:** <@${candidatoId}>\n` +
+          `> **Aprovado por:** <@${interaction.user.id}>\n` +
+          `> **Nick:** \`${novoNick}\`\n` +
+          `> **Data:** ${agora()}`
+        )
+      )
+    await logCh.send({ components: [logBox], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
+  }
+
+  // Resposta no ticket
+  const aprovBox = new ContainerBuilder()
+    .setAccentColor(COLOR_SUCCESS)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '## ✅ MEMBRO APROVADO!\n\n' +
+        `> ${member} foi aprovado como **Morador** da MS-13.\n` +
+        `> **Nick:** \`${novoNick}\`\n` +
+        '> Bem-vindo à família! 🔫'
+      )
+    )
+  // Adiciona erros de hierarquia ao embed se houver
+  if (erros.length > 0) {
+    const temHierarquia = erros.some(e => e.includes('50013') || e.includes('Missing Permissions'))
+    await interaction.followUp({
+      content: temHierarquia
+        ? '⚠️ Nick/Cargo não aplicado — bot sem hierarquia suficiente. Suba o cargo do bot acima dos membros.'
+        : `⚠️ Erros: ${erros.join(', ')}`,
+      ephemeral: true,
+    }).catch(() => null)
+  }
+
+  await interaction.editReply({ components: [aprovBox], flags: MessageFlags.IsComponentsV2 })
+
+  // DM ao candidato — igual ao Python AprovarMembroModal
+  member.send({
+    embeds: [{
+      title: '✅ Aprovado — 1ª Fase | MS-13',
+      description: `Parabéns, **${nomeIC}**! Você foi aprovado na 1ª fase!\n\n🏷️ Nick: \`${novoNick}\`\n🎖️ Cargo: **♱ 2ª Etapa**\n\nVá para o canal de voz **AGUARDANDO**. 🔵`,
+      color: 0x2ECC71,
+    }],
+  }).catch(() => null) // ignora se DM fechada
+
+  // ✅ ATUALIZA RANKING EM TEMPO REAL
+  await atualizarRanking('recrutadores', guild)
 }
 
-// ── Execute ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Handler principal (interactions)
+// ─────────────────────────────────────────────────────────────────────────────
 async function execute(interaction) {
   const id = interaction.customId
 
+  // ── Fechar ────────────────────────────────────────────────────────────────
   if (id === 'rec_fechar') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_fechar_ticket').setTitle('Fechar Ticket').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('motivo_fechar').setLabel('Motivo do fechamento').setStyle(TextInputStyle.Paragraph).setRequired(true))))
+    if (!isStaff(interaction.member))
+      return interaction.reply({ content: '❌ Apenas staff pode fechar tickets.', ephemeral: true })
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_fechar').setTitle('Fechar Ticket').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('motivo_fechar').setLabel('Motivo do fechamento').setStyle(TextInputStyle.Paragraph).setRequired(true)
+        )
+      )
+    )
   }
 
-  if (id === 'modal_fechar_ticket') {
+  if (id === 'modal_rec_fechar') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply()
-    const motivo = interaction.fields.getTextInputValue('motivo_fechar')
-    const db = getDb()
+    const motivo      = interaction.fields.getTextInputValue('motivo_fechar')
     const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (candidatoId) db.prepare(`UPDATE recrutamentos SET status = 'fechado', fechado_em = datetime('now','localtime') WHERE candidato_id = ? AND status = 'aberto'`).run(candidatoId)
-    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR_ERROR).setTitle('🔒 Ticket Fechado').addFields({ name: 'Fechado por', value: `<@${interaction.user.id}>` }, { name: 'Motivo', value: motivo }).setFooter(footerEmbed())] })
+    if (candidatoId) {
+      getDb().prepare("UPDATE recrutamentos SET status='fechado', fechado_em=datetime('now','localtime') WHERE candidato_id=? AND status='aberto'").run(candidatoId)
+    }
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_ERROR)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `## 🔒 TICKET FECHADO\n\n> **Por:** <@${interaction.user.id}>\n> **Motivo:** ${motivo}\n> **Data:** ${agora()}`
+        )
+      )
+    await interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
     setTimeout(() => interaction.channel.delete().catch(() => null), 5_000)
     return
   }
 
+  // ── Assumir ───────────────────────────────────────────────────────────────
   if (id === 'rec_assumir') {
-    if (!isRecrutador(interaction.member)) return interaction.reply({ content: '❌ Apenas recrutadores podem assumir.', ephemeral: true })
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Apenas recrutadores podem assumir tickets.', ephemeral: true })
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply()
-    const db = getDb()
     const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (candidatoId) db.prepare(`UPDATE recrutamentos SET recrutador_id = ? WHERE candidato_id = ? AND status = 'aberto'`).run(interaction.user.id, candidatoId)
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR_SUCCESS).setDescription(`✅ <@${interaction.user.id}> assumiu este ticket.`).setFooter(footerEmbed())] })
+    if (candidatoId) {
+      getDb().prepare("UPDATE recrutamentos SET recrutador_id=? WHERE candidato_id=? AND status='aberto'").run(interaction.user.id, candidatoId)
+    }
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_SUCCESS)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`> ✅ <@${interaction.user.id}> assumiu este ticket.`)
+      )
+    return interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
   }
 
+  // ── Renomear ──────────────────────────────────────────────────────────────
   if (id === 'rec_renomear') {
-    if (!isRecrutador(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_renomear').setTitle('Renomear Ticket').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('novo_nome').setLabel('Novo nome do canal').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90))))
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_renomear').setTitle('Renomear Canal').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('novo_nome').setLabel('Novo nome do canal').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90)
+        )
+      )
+    )
   }
 
-  if (id === 'modal_renomear') {
+  if (id === 'modal_rec_renomear') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const novoNome = interaction.fields.getTextInputValue('novo_nome').toLowerCase().replace(/\s+/g, '-')
-    await interaction.channel.setName(novoNome).catch(() => null)
-    return interaction.editReply({ content: `✅ Canal renomeado para **${novoNome}**.` })
+    const nome = interaction.fields.getTextInputValue('novo_nome').toLowerCase().replace(/\s+/g, '-')
+    await interaction.channel.setName(nome).catch(() => null)
+    return interaction.editReply({ content: `✅ Canal renomeado para **${nome}**.` })
   }
 
+  // ── Formulário (entrevista) ───────────────────────────────────────────────
   if (id === 'rec_enviar_form') {
-    if (!isRecrutador(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
     const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
@@ -274,43 +499,87 @@ async function execute(interaction) {
     await interaction.editReply({ content: '✅ Iniciando entrevista...' })
     const respostas = await _conduzirEntrevista(interaction.channel, candidatoId)
     if (!respostas) return
-    await interaction.channel.send({ embeds: [new EmbedBuilder().setColor(COLOR_REC).setTitle('📋 Respostas do Formulário').setDescription(respostas.map((r, i) => `**${i + 1}. ${r.pergunta}**\n> ${r.resposta}`).join('\n\n')).setFooter({ text: `Candidato: ${candidatoId} | ${FOOTER_TEXT}` }).setTimestamp()] })
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_REC)
+      .addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_REC)))
+      .addSeparatorComponents(new SeparatorBuilder())
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          '## 📋 RESPOSTAS DO FORMULÁRIO\n\n' +
+          respostas.map((r, i) => `**${i + 1}. ${r.pergunta}**\n> ${r.resposta}`).join('\n\n') +
+          `\n\n-# Candidato: ${candidatoId} | ${agora()}`
+        )
+      )
+    await interaction.channel.send({ components: [box], flags: MessageFlags.IsComponentsV2 })
     return
   }
 
-  if (id === 'rec_cancel_timer') { return interaction.reply({ content: '⏹ Timer cancelado.', ephemeral: true }) }
-
-  if (id === 'rec_aprovar_m') {
-    if (!isRecrutador(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_aprovar_membro').setTitle('Aprovar Membro').addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nome_ic').setLabel('Nome IC do personagem').setStyle(TextInputStyle.Short).setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('id_mta').setLabel('ID MTA do personagem').setStyle(TextInputStyle.Short).setRequired(true)),
-    ))
+  if (id === 'rec_cancel_timer') {
+    return interaction.reply({ content: '⏹ Timer cancelado.', ephemeral: true })
   }
 
-  if (id === 'modal_aprovar_membro') {
+  // ── Aprovar ───────────────────────────────────────────────────────────────
+  if (id === 'rec_aprovar_m') {
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_aprovar').setTitle('Aprovar Membro').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('nome_ic').setLabel('Nome IC do personagem').setStyle(TextInputStyle.Short).setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('id_mta').setLabel('ID MTA do personagem').setStyle(TextInputStyle.Short).setRequired(true)
+        )
+      )
+    )
+  }
+
+  if (id === 'modal_rec_aprovar') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply()
-    return _aprovarMembro(interaction, interaction.fields.getTextInputValue('nome_ic').trim(), interaction.fields.getTextInputValue('id_mta').trim())
+    return _aprovarMembro(
+      interaction,
+      interaction.fields.getTextInputValue('nome_ic').trim(),
+      interaction.fields.getTextInputValue('id_mta').trim()
+    )
   }
 
+  // ── Reprovar ──────────────────────────────────────────────────────────────
   if (id === 'rec_reprovar_m') {
-    if (!isRecrutador(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply()
     const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (candidatoId) getDb().prepare(`UPDATE recrutamentos SET status = 'reprovado', fechado_em = datetime('now','localtime') WHERE candidato_id = ? AND status = 'aberto'`).run(candidatoId)
-    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR_ERROR).setTitle('❌ Candidato Reprovado').setDescription(`<@${candidatoId}> foi reprovado.`).addFields({ name: 'Reprovado por', value: `<@${interaction.user.id}>`, inline: true }).setFooter(footerEmbed())] })
+    if (candidatoId) {
+      getDb().prepare("UPDATE recrutamentos SET status='reprovado', fechado_em=datetime('now','localtime') WHERE candidato_id=? AND status='aberto'").run(candidatoId)
+    }
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_ERROR)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `## ❌ CANDIDATO REPROVADO\n\n> **Candidato:** <@${candidatoId}>\n> **Por:** <@${interaction.user.id}>\n> **Data:** ${agora()}`
+        )
+      )
+    await interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
     setTimeout(() => interaction.channel.delete().catch(() => null), 8_000)
     return
   }
 
+  // ── Blacklist ─────────────────────────────────────────────────────────────
   if (id === 'rec_blacklist') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_blacklist').setTitle('Adicionar à Blacklist').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('motivo_bl').setLabel('Motivo').setStyle(TextInputStyle.Paragraph).setRequired(true))))
+    if (!isStaff(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_blacklist').setTitle('Adicionar à Blacklist').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('motivo_bl').setLabel('Motivo').setStyle(TextInputStyle.Paragraph).setRequired(true)
+        )
+      )
+    )
   }
 
-  if (id === 'modal_blacklist') {
+  if (id === 'modal_rec_blacklist') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply()
     const motivo      = interaction.fields.getTextInputValue('motivo_bl')
@@ -318,74 +587,110 @@ async function execute(interaction) {
     if (!candidatoId) return interaction.editReply({ content: '❌ Candidato não identificado.' })
     getDb().prepare('INSERT OR REPLACE INTO blacklist (user_id, motivo, adicionado_por) VALUES (?, ?, ?)').run(candidatoId, motivo, interaction.user.id)
     const blCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.blacklist)
-    if (blCh) await blCh.send({ embeds: [new EmbedBuilder().setColor(COLOR_ERROR).setTitle('🚫 Adicionado à Blacklist').addFields({ name: 'Usuário', value: `<@${candidatoId}>`, inline: true }, { name: 'Por', value: `<@${interaction.user.id}>`, inline: true }, { name: 'Motivo', value: motivo }, { name: 'Data', value: agora(), inline: true }).setFooter(footerEmbed())] })
-    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR_ERROR).setTitle('🚫 Blacklist atualizada').setDescription(`<@${candidatoId}> adicionado.\n**Motivo:** ${motivo}`).setFooter(footerEmbed())] })
+    if (blCh) {
+      await blCh.send({
+        components: [
+          new ContainerBuilder().setAccentColor(COLOR_ERROR).addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+              `## 🚫 ADICIONADO À BLACKLIST\n\n> **Usuário:** <@${candidatoId}>\n> **Por:** <@${interaction.user.id}>\n> **Motivo:** ${motivo}\n> **Data:** ${agora()}`
+            )
+          ),
+        ],
+        flags: MessageFlags.IsComponentsV2,
+      }).catch(() => null)
+    }
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_ERROR)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`## 🚫 BLACKLIST\n\n> <@${candidatoId}> foi adicionado à blacklist.\n> **Motivo:** ${motivo}`)
+      )
+    await interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
     setTimeout(() => interaction.channel.delete().catch(() => null), 8_000)
     return
   }
 
+  // ── Gerar ticket manualmente ──────────────────────────────────────────────
   if (id === 'rec_gerar_tkt') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    if (!isStaff(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const guild     = interaction.guild
-    const categoria = REC_CHANNEL_IDS.categoria_rec !== '0' ? guild.channels.cache.get(REC_CHANNEL_IDS.categoria_rec) : null
-    const nomeCanal = `rec-${interaction.user.username}-${Date.now().toString().slice(-4)}`
+    const { guild }     = interaction
+    const candidatoId   = interaction.user.id
+
+    // ✅ Anti-duplicação
+    const existente = getTicketAberto(candidatoId)
+    if (existente) {
+      const canal = guild.channels.cache.get(existente.ticket_id)
+      return interaction.editReply({
+        content: canal
+          ? `⚠️ Já existe ticket aberto: ${canal}. Feche-o antes.`
+          : '⚠️ Já existe um ticket em aberto no banco. Feche-o antes.',
+      })
+    }
+    const naBl = getDb().prepare('SELECT id FROM blacklist WHERE user_id=?').get(candidatoId)
+    if (naBl) return interaction.editReply({ content: '🚫 Usuário está na blacklist.' })
+
+    const cat    = REC_CHANNEL_IDS.categoria_rec !== '0' ? guild.channels.cache.get(REC_CHANNEL_IDS.categoria_rec) : null
     const novoCanal = await guild.channels.create({
-      name: nomeCanal, type: ChannelType.GuildText, parent: categoria || undefined,
-      topic: `Candidato: ${interaction.user.id}`,
+      name:  `rec-${interaction.user.username}-${Date.now().toString().slice(-4)}`,
+      type:  ChannelType.GuildText,
+      parent: cat ?? undefined,
+      topic: `Candidato: ${candidatoId}`,
       permissionOverwrites: [
-        { id: guild.id,                 deny:  [PermissionFlagsBits.ViewChannel] },
-        { id: interaction.user.id,      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-        { id: _PERM_TICKET_ROLE_ID,     allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+        { id: guild.id,              deny:  [PermissionFlagsBits.ViewChannel] },
+        { id: candidatoId,           allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+        { id: _PERM_TICKET_ROLE_ID,  allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
       ],
     })
-    getDb().prepare('INSERT INTO recrutamentos (candidato_id, ticket_id, status) VALUES (?, ?, \'aberto\')').run(interaction.user.id, novoCanal.id)
-    await novoCanal.send({ content: buildRecContent(`<@${interaction.user.id}>`, `<@${interaction.user.id}>`), embeds: [new EmbedBuilder().setColor(COLOR_REC).setTitle('🎫 Ticket de Recrutamento').setDescription(`Candidato: <@${interaction.user.id}>\nResponsável: Aguardando`).addFields({ name: 'Status', value: '🟡 Em andamento', inline: true }, { name: 'Aberto em', value: agora(), inline: true }).setFooter(footerEmbed()).setTimestamp()], components: buildTicketRecView() })
+    getDb().prepare("INSERT OR IGNORE INTO recrutamentos (candidato_id, ticket_id, status) VALUES (?, ?, 'aberto')").run(candidatoId, novoCanal.id)
+    await novoCanal.send(buildTicketAberturaContainer(candidatoId, agora()))
     return interaction.editReply({ content: `✅ Ticket criado: ${novoCanal}` })
   }
 
+  // ── Gerenciamento de perguntas ────────────────────────────────────────────
   if (id === 'rec_add_q') {
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_add_pergunta').setTitle('Adicionar Pergunta').addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('texto_pergunta').setLabel('Texto da pergunta').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_chars').setLabel('Máx. caracteres (padrão 500)').setStyle(TextInputStyle.Short).setRequired(false)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('obrigatoria').setLabel('Obrigatória? (sim/não)').setStyle(TextInputStyle.Short).setRequired(false)),
-    ))
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_add_q').setTitle('Adicionar Pergunta').addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('texto').setLabel('Texto da pergunta').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_chars').setLabel('Máx. caracteres (padrão 500)').setStyle(TextInputStyle.Short).setRequired(false)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('obrigatoria').setLabel('Obrigatória? (sim/não)').setStyle(TextInputStyle.Short).setRequired(false)),
+      )
+    )
   }
-
-  if (id === 'modal_add_pergunta') {
+  if (id === 'modal_rec_add_q') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const texto      = interaction.fields.getTextInputValue('texto_pergunta').trim()
-    const maxChars   = parseInt(interaction.fields.getTextInputValue('max_chars').trim()) || 500
-    const obRaw      = interaction.fields.getTextInputValue('obrigatoria').trim().toLowerCase()
+    const texto       = interaction.fields.getTextInputValue('texto').trim()
+    const maxChars    = parseInt(interaction.fields.getTextInputValue('max_chars')) || 500
+    const obRaw       = interaction.fields.getTextInputValue('obrigatoria').trim().toLowerCase()
     const obrigatoria = (obRaw === 'não' || obRaw === 'nao' || obRaw === 'n') ? 0 : 1
-    const db   = getDb()
-    const ordem = (db.prepare('SELECT MAX(ordem) as m FROM perguntas').get()?.m ?? 0) + 1
+    const db          = getDb()
+    const ordem       = (db.prepare('SELECT MAX(ordem) AS m FROM perguntas').get()?.m ?? 0) + 1
     db.prepare('INSERT INTO perguntas (texto, obrigatoria, max_chars, ordem) VALUES (?, ?, ?, ?)').run(texto, obrigatoria, maxChars, ordem)
     await interaction.editReply({ content: '✅ Pergunta adicionada!' })
-    const painelCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.painel_formulario)
-    if (painelCh) { const msgs = await painelCh.messages.fetch({ limit: 10 }); const msg = msgs.find(m => m.author.id === interaction.client.user.id && m.embeds[0]?.footer?.text?.includes('PAINEL_FORM')); if (msg) await msg.edit({ embeds: [buildPainelFormularioEmbed()] }) }
+    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
     return
   }
 
   if (id === 'rec_edit_q') {
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_editar_pergunta').setTitle('Editar Pergunta').addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('id_pergunta').setLabel('ID da pergunta').setStyle(TextInputStyle.Short).setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('novo_texto').setLabel('Novo texto').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-    ))
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_edit_q').setTitle('Editar Pergunta').addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('id_p').setLabel('ID da pergunta').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('novo_texto').setLabel('Novo texto').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+      )
+    )
   }
-
-  if (id === 'modal_editar_pergunta') {
+  if (id === 'modal_rec_edit_q') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const idP      = parseInt(interaction.fields.getTextInputValue('id_pergunta'))
-    const novoTexto = interaction.fields.getTextInputValue('novo_texto').trim()
-    const r = getDb().prepare('UPDATE perguntas SET texto = ? WHERE id = ?').run(novoTexto, idP)
-    if (r.changes === 0) return interaction.editReply({ content: '❌ Pergunta não encontrada.' })
+    const r = getDb().prepare('UPDATE perguntas SET texto=? WHERE id=?').run(
+      interaction.fields.getTextInputValue('novo_texto').trim(),
+      parseInt(interaction.fields.getTextInputValue('id_p'))
+    )
+    if (r.changes === 0) return interaction.editReply({ content: '❌ Pergunta não encontrada. Verifique o ID.' })
     await interaction.editReply({ content: '✅ Pergunta editada!' })
-    const painelCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.painel_formulario)
-    if (painelCh) { const msgs = await painelCh.messages.fetch({ limit: 10 }); const msg = msgs.find(m => m.author.id === interaction.client.user.id && m.embeds[0]?.footer?.text?.includes('PAINEL_FORM')); if (msg) await msg.edit({ embeds: [buildPainelFormularioEmbed()] }) }
+    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
     return
   }
 
@@ -394,84 +699,151 @@ async function execute(interaction) {
     await interaction.deferReply({ ephemeral: true })
     const perguntas = getDb().prepare('SELECT id, texto FROM perguntas ORDER BY ordem ASC').all()
     if (perguntas.length === 0) return interaction.editReply({ content: '❌ Nenhuma pergunta cadastrada.' })
-    return interaction.editReply({ content: 'Selecione a pergunta a remover:', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('rec_select_candidatos').setPlaceholder('Selecione').addOptions(perguntas.slice(0, 25).map(p => ({ label: p.texto.slice(0, 100), value: String(p.id) }))))] })
+    return interaction.editReply({
+      content: 'Selecione a pergunta a remover:',
+      components: [
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('rec_select_rem_q')
+            .setPlaceholder('Selecione a pergunta')
+            .addOptions(perguntas.slice(0, 25).map(p => ({ label: p.texto.slice(0, 100), value: String(p.id) })))
+        ),
+      ],
+    })
+  }
+  if (id === 'rec_select_rem_q') {
+    if (interaction.replied || interaction.deferred) return
+    await interaction.deferReply({ ephemeral: true })
+    const r = getDb().prepare('DELETE FROM perguntas WHERE id=?').run(parseInt(interaction.values[0]))
+    if (r.changes > 0) {
+      await interaction.editReply({ content: '✅ Pergunta removida!', components: [] })
+      await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
+    } else {
+      await interaction.editReply({ content: '❌ Pergunta não encontrada.', components: [] })
+    }
+    return
   }
 
-  if (id === 'rec_timer_q') { return interaction.reply({ content: '⚠️ Timer disponível via /painel-formulario.', ephemeral: true }) }
-  if (id === 'rec_view_q')  { if (interaction.replied || interaction.deferred) return; await interaction.deferReply({ ephemeral: true }); return interaction.editReply({ embeds: [buildPainelFormularioEmbed()] }) }
+  if (id === 'rec_timer_q') return interaction.reply({ content: '⚠️ Timer configurável via `/painel-formulario`.', ephemeral: true })
 
+  if (id === 'rec_view_q') {
+    if (interaction.replied || interaction.deferred) return
+    await interaction.deferReply({ ephemeral: true })
+    return interaction.editReply(buildPainelFormularioContainer())
+  }
   if (id === 'rec_refresh_q') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const painelCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.painel_formulario)
-    if (painelCh) { const msgs = await painelCh.messages.fetch({ limit: 10 }); const msg = msgs.find(m => m.author.id === interaction.client.user.id && m.embeds[0]?.footer?.text?.includes('PAINEL_FORM')); if (msg) await msg.edit({ embeds: [buildPainelFormularioEmbed()] }) }
+    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
     return interaction.editReply({ content: '✅ Painel atualizado!' })
   }
-
   if (id === 'rec_export_q') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
     const perguntas = getDb().prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
-    return interaction.editReply({ content: '📤 Exportação:', files: [{ attachment: Buffer.from(JSON.stringify(perguntas, null, 2), 'utf8'), name: 'perguntas_formulario.json' }] })
+    return interaction.editReply({
+      content: '📤 Exportação:',
+      files: [{ attachment: Buffer.from(JSON.stringify(perguntas, null, 2), 'utf8'), name: 'perguntas.json' }],
+    })
   }
 
+  // ── Relatório ─────────────────────────────────────────────────────────────
   if (id === 'rec_gerar_rel_v14') {
-    if (!isRecrutador(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(new ModalBuilder().setCustomId('modal_confirmar_relatorio').setTitle('Gerar Relatório').addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('obs_relatorio').setLabel('Observações (opcional)').setStyle(TextInputStyle.Paragraph).setRequired(false))))
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    return interaction.showModal(
+      new ModalBuilder().setCustomId('modal_rec_relatorio').setTitle('Gerar Relatório').addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('obs').setLabel('Observações (opcional)').setStyle(TextInputStyle.Paragraph).setRequired(false)
+        )
+      )
+    )
   }
-
-  if (id === 'modal_confirmar_relatorio') {
+  if (id === 'modal_rec_relatorio') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const obs       = interaction.fields.getTextInputValue('obs_relatorio').trim()
-    const db        = getDb()
-    const total     = db.prepare('SELECT COUNT(*) as c FROM recrutamentos WHERE recrutador_id = ?').get(interaction.user.id)?.c ?? 0
-    const aprovados = db.prepare("SELECT COUNT(*) as c FROM recrutamentos WHERE recrutador_id = ? AND status = 'aprovado'").get(interaction.user.id)?.c ?? 0
-    const reprovados = db.prepare("SELECT COUNT(*) as c FROM recrutamentos WHERE recrutador_id = ? AND status = 'reprovado'").get(interaction.user.id)?.c ?? 0
-    const embed = new EmbedBuilder().setColor(COLOR_REC).setTitle(`📊 Relatório de ${interaction.user.displayName}`).addFields({ name: 'Total de tickets', value: String(total), inline: true }, { name: 'Aprovações', value: String(aprovados), inline: true }, { name: 'Reprovações', value: String(reprovados), inline: true }, { name: 'Observações', value: obs || 'Nenhuma' }).setFooter({ text: `${FOOTER_TEXT} | ${agora()}` }).setTimestamp()
+    const obs  = interaction.fields.getTextInputValue('obs').trim()
+    const uid  = interaction.user.id
+    const db   = getDb()
+    const tot  = db.prepare("SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=?").get(uid)?.c ?? 0
+    const aprov = db.prepare("SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=? AND status='aprovado'").get(uid)?.c ?? 0
+    const repr  = db.prepare("SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=? AND status='reprovado'").get(uid)?.c ?? 0
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_REC)
+      .addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_REC)))
+      .addSeparatorComponents(new SeparatorBuilder())
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `## 📊 RELATÓRIO — ${interaction.user.displayName}\n\n` +
+          `> **Atendidos:** \`${tot}\`\n> **Aprovações:** \`${aprov}\`\n> **Reprovações:** \`${repr}\`\n` +
+          (obs ? `> **Obs:** ${obs}` : '') +
+          `\n\n-# Gerado em ${agora()} | ${FOOTER_TEXT}`
+        )
+      )
     const relCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.relatorio_rec)
-    if (relCh) await relCh.send({ embeds: [embed] })
     const logCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.logs_relatorios_rec)
-    if (logCh) await logCh.send({ embeds: [embed] })
-    return interaction.editReply({ content: '✅ Relatório gerado!', embeds: [embed] })
+    if (relCh) await relCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
+    if (logCh) await logCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
+    return interaction.editReply({ content: '✅ Relatório gerado!' })
   }
 
+  // ── Ver blacklist ─────────────────────────────────────────────────────────
   if (id === 'rec_blacklist_v14') {
-    if (!isStaff(interaction.member)) return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    if (!isStaff(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
     const lista = getDb().prepare('SELECT * FROM blacklist ORDER BY adicionado_em DESC LIMIT 25').all()
-    if (lista.length === 0) return interaction.editReply({ content: '✅ Blacklist vazia.' })
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR_ERROR).setTitle('🚫 Blacklist de Recrutamento').setDescription(lista.map((e, i) => `**${i + 1}.** <@${e.user_id}> — ${e.motivo}\n> Por <@${e.adicionado_por}> em ${e.adicionado_em}`).join('\n\n')).setFooter(footerEmbed()).setTimestamp()] })
+    if (lista.length === 0) return interaction.editReply({ content: '✅ Blacklist está vazia.' })
+    const box = new ContainerBuilder()
+      .setAccentColor(COLOR_ERROR)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          '## 🚫 BLACKLIST DE RECRUTAMENTO\n\n' +
+          lista.map((e, i) => `**${i + 1}.** <@${e.user_id}> — ${e.motivo}\n> Por <@${e.adicionado_por}> em ${e.adicionado_em}`).join('\n\n') +
+          `\n\n-# Total: ${lista.length} usuário(s) | ${FOOTER_TEXT}`
+        )
+      )
+    return interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
   }
 
+  // compat IDs legados
   if (id === 'sel_cand_v14' || id === 'sel_rec_v14' || id === 'rec_select_candidatos') {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
-    const valor = interaction.values[0]
-    const r     = getDb().prepare('DELETE FROM perguntas WHERE id = ?').run(parseInt(valor))
+    const r = getDb().prepare('DELETE FROM perguntas WHERE id=?').run(parseInt(interaction.values[0]))
     if (r.changes > 0) {
       await interaction.editReply({ content: '✅ Pergunta removida!', components: [] })
-      const painelCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.painel_formulario)
-      if (painelCh) { const msgs = await painelCh.messages.fetch({ limit: 10 }); const msg = msgs.find(m => m.author.id === interaction.client.user.id && m.embeds[0]?.footer?.text?.includes('PAINEL_FORM')); if (msg) await msg.edit({ embeds: [buildPainelFormularioEmbed()] }) }
-    } else { await interaction.editReply({ content: '❌ Item não encontrado.', components: [] }) }
+      await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
+    } else {
+      await interaction.editReply({ content: '❌ Não encontrada.', components: [] })
+    }
     return
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 const customIds = [
   'rec_fechar','rec_assumir','rec_renomear','rec_enviar_form','rec_cancel_timer',
   'rec_aprovar_m','rec_reprovar_m','rec_blacklist','rec_gerar_tkt',
   'rec_add_q','rec_edit_q','rec_rem_q','rec_timer_q','rec_view_q','rec_refresh_q','rec_export_q',
-  'rec_gerar_rel_v14','rec_blacklist_v14','sel_cand_v14','sel_rec_v14','rec_select_candidatos',
-  'modal_fechar_ticket','modal_renomear','modal_aprovar_membro','modal_blacklist',
-  'modal_add_pergunta','modal_editar_pergunta','modal_confirmar_relatorio',
+  'rec_select_rem_q','rec_gerar_rel_v14','rec_blacklist_v14',
+  'sel_cand_v14','sel_rec_v14','rec_select_candidatos',
+  'modal_rec_fechar','modal_rec_renomear','modal_rec_aprovar','modal_rec_blacklist',
+  'modal_rec_add_q','modal_rec_edit_q','modal_rec_relatorio',
 ]
 
 module.exports = {
-  customIds, execute,
-  buildPainelFormularioEmbed, buildTicketRecView,
-  buildPainelFormulario, buildPainelRelatorio, buildPainelBlacklist,
-  buildTopRecrutadores, buildTopRecrutadoresVazio,
-  atualizarRankingRecrutadores, buildRecContent,
+  customIds,
+  execute,
+  buildPainelFormulario,
+  buildPainelFormularioContainer,
+  buildPainelRelatorio,
+  buildPainelBlacklist,
+  buildPainelRecrutamento,
+  buildTopRecrutadores,
+  buildTopRecrutadoresVazio,
+  buildTicketAberturaContainer,
+  buildRecContent,
+  atualizarRankingRecrutadores: (guild) => atualizarRanking('recrutadores', guild),
 }

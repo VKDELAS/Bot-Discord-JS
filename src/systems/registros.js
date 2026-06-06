@@ -5,6 +5,7 @@
 
 const {
   ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder,
+  ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
 } = require('discord.js')
 
 const fs   = require('fs')
@@ -40,25 +41,92 @@ function salvarRegistros(data) {
 
 const customIds = ['conf_advertencias_v13', 'conf_metas_v13']
 
-function buildEmbedRegistros() {
-  return new EmbedBuilder()
-    .setTitle('# Central de Registros — MS-13')
-    .setDescription(
+// ─── Legado (mantidos por compatibilidade) ────────────────────────────────────
+function buildEmbedRegistros() { return null }
+function buildCentralRegistrosRow() { return [] }
+
+// ─── V2: Painel de Registros ──────────────────────────────────────────────────
+function buildRegistrosV2() {
+  const container = new ContainerBuilder()
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# 📋 Central de Registros — MS-13')
+  )
+  container.addSeparatorComponents(new SeparatorBuilder())
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
       '> Use os botões abaixo para confirmar as advertências ou metas do dia.\n' +
       '> Após a confirmação os registros do dia são limpos do arquivo.'
     )
-    .setColor(COLOR_MS13)
-    .setFooter({ text: FOOTER_TEXT })
-    .setTimestamp()
-}
-
-function buildCentralRegistrosRow() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('conf_advertencias_v13').setLabel('✅ Confirmar Advs').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('conf_metas_v13').setLabel('✅ Confirmar Metas').setStyle(ButtonStyle.Primary),
   )
+  container.addSeparatorComponents(new SeparatorBuilder())
+  container.addActionRowComponents(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('conf_advertencias_v13').setLabel('✅ Confirmar Advs').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('conf_metas_v13').setLabel('✅ Confirmar Metas').setStyle(ButtonStyle.Primary),
+    )
+  )
+
+  return { components: [container], flags: (1 << 15) }
 }
 
+// ─── V2: Painel de Membros ────────────────────────────────────────────────────
+function buildMembrosV2() {
+  const container = new ContainerBuilder()
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# 🔫 Painel de Membros — MS-13')
+  )
+  container.addSeparatorComponents(new SeparatorBuilder())
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      '> *"A lealdade é a base de tudo."*\n\n' +
+      '**📌 Registro de Ações**\n' +
+      '- 💀 **Kill** — Registrar eliminação\n' +
+      '- 🏧 **ATM** — Registrar saque no caixa\n' +
+      '- 🛒 **Loja** — Registrar compra em loja\n' +
+      '- 💊 **Cracolândia** — Registrar ponto de venda\n' +
+      '- 💤 **AFK** — Registrar ausência temporária\n' +
+      '- 🏃 **Corrida** — Registrar rota concluída\n\n' +
+      '**📅 Gestão Pessoal**\n' +
+      '- 📅 **Ausência** — Comunicar ausência\n' +
+      '- 📊 **Meta** — Verificar/registrar meta\n' +
+      '- 📋 **Geral** — Registro livre'
+    )
+  )
+  container.addSeparatorComponents(new SeparatorBuilder())
+
+  // Fileira 1 — ações de campo
+  container.addActionRowComponents(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('reg_kill_v13').setLabel('💀 Kill').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('reg_atm_v13').setLabel('🏧 ATM').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('reg_loja_v13').setLabel('🛒 Loja').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('reg_craco_v13').setLabel('💊 Cracolândia').setStyle(ButtonStyle.Secondary),
+    )
+  )
+
+  // Fileira 2 — atividades
+  container.addActionRowComponents(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('reg_afk_v13').setLabel('💤 AFK').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('reg_corrida_v13').setLabel('🏃 Corrida').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('reg_ausencia_v13').setLabel('📅 Ausência').setStyle(ButtonStyle.Secondary),
+    )
+  )
+
+  // Fileira 3 — gestão
+  container.addActionRowComponents(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('reg_meta_v13').setLabel('📊 Meta').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('reg_geral_v13').setLabel('📋 Geral').setStyle(ButtonStyle.Secondary),
+    )
+  )
+
+  return { components: [container], flags: (1 << 15) }
+}
+
+// ─── Execute ──────────────────────────────────────────────────────────────────
 async function execute(interaction) {
   const { customId, guild, member } = interaction
   if (interaction.replied || interaction.deferred) return
@@ -163,4 +231,14 @@ function iniciarLoopMultas(client) {
   setInterval(tick, 5 * 60 * 1000)
 }
 
-module.exports = { customIds, execute, iniciarLoopMultas, buildEmbedRegistros, buildCentralRegistrosRow }
+module.exports = {
+  customIds,
+  execute,
+  iniciarLoopMultas,
+  // Legado
+  buildEmbedRegistros,
+  buildCentralRegistrosRow,
+  // V2
+  buildRegistrosV2,
+  buildMembrosV2,
+}

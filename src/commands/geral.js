@@ -29,8 +29,12 @@ const iniciar = {
       }
       const registrosChannel = guild.channels.cache.get(CHANNEL_IDS.central_registros)
       if (registrosChannel) {
-        const { buildEmbedRegistros, buildCentralRegistrosRow } = require('../systems/registros')
-        await smartPost(registrosChannel, { embeds: [buildEmbedRegistros()], components: [buildCentralRegistrosRow()] })
+        const { buildRegistrosV2 } = require('../systems/registros')
+        const { buildMembrosV2 }   = require('../systems/membros')
+        // Posta painel de registros
+        await smartPost(registrosChannel, buildRegistrosV2())
+        // Posta painel de membros no mesmo canal
+        await smartPost(registrosChannel, buildMembrosV2())
       }
       const gerenciaChannel = guild.channels.cache.get(CHANNEL_IDS.central_gerencia)
       if (gerenciaChannel) {
@@ -53,26 +57,36 @@ const atualizarPaineis = {
     await interaction.deferReply({ ephemeral: true })
     try {
       const { guild, client } = interaction
-      const channelEntries = [
-        { id: CHANNEL_IDS.central_tickets,   builder: 'buildCentralTicketsView',   system: 'tickets',   useV2: false },
-        { id: CHANNEL_IDS.central_registros, builder: null,                        system: 'registros', useV2: false },
-        { id: CHANNEL_IDS.central_gerencia,  builder: 'buildCentralGerenciaView',  system: 'gerencia',  useV2: false },
-      ]
-      for (const entry of channelEntries) {
-        const channel = guild.channels.cache.get(entry.id)
-        if (!channel) continue
-        const messages = await channel.messages.fetch({ limit: 50 })
-        const botMsgs  = messages.filter(m => m.author.id === client.user.id)
-        for (const [, msg] of botMsgs) await msg.delete().catch(() => {})
-        const sys = require(`../systems/${entry.system}`)
-        let payload
-        if (entry.system === 'registros') {
-          payload = { embeds: [sys.buildEmbedRegistros()], components: [sys.buildCentralRegistrosRow()] }
-        } else {
-          payload = await sys[entry.builder](guild)
-        }
-        await channel.send(payload)
+
+      // Tickets
+      const ticketsChannel = guild.channels.cache.get(CHANNEL_IDS.central_tickets)
+      if (ticketsChannel) {
+        const messages = await ticketsChannel.messages.fetch({ limit: 50 })
+        for (const [, msg] of messages.filter(m => m.author.id === client.user.id)) await msg.delete().catch(() => {})
+        const { buildCentralTicketsView } = require('../systems/tickets')
+        await ticketsChannel.send(await buildCentralTicketsView(guild))
       }
+
+      // Registros + Membros (mesmo canal)
+      const registrosChannel = guild.channels.cache.get(CHANNEL_IDS.central_registros)
+      if (registrosChannel) {
+        const messages = await registrosChannel.messages.fetch({ limit: 50 })
+        for (const [, msg] of messages.filter(m => m.author.id === client.user.id)) await msg.delete().catch(() => {})
+        const { buildRegistrosV2 } = require('../systems/registros')
+        const { buildMembrosV2 }   = require('../systems/membros')
+        await registrosChannel.send(buildRegistrosV2())
+        await registrosChannel.send(buildMembrosV2())
+      }
+
+      // Gerência
+      const gerenciaChannel = guild.channels.cache.get(CHANNEL_IDS.central_gerencia)
+      if (gerenciaChannel) {
+        const messages = await gerenciaChannel.messages.fetch({ limit: 50 })
+        for (const [, msg] of messages.filter(m => m.author.id === client.user.id)) await msg.delete().catch(() => {})
+        const { buildCentralGerenciaView } = require('../systems/gerencia')
+        await gerenciaChannel.send(await buildCentralGerenciaView(guild))
+      }
+
       await interaction.editReply({ content: '✅ Todos os painéis foram recriados!' })
     } catch (err) {
       console.error('[/atualizar-paineis]', err)

@@ -29,6 +29,10 @@ const customIds = [
   'eli_aceitar_v14', 'eli_fechar_v14',
   'par_aceitar_v14', 'par_fechar_v14',
   'sup_modal_v14', 'eli_modal_v14', 'par_modal_v14',
+  // Botões do sistema de recrutamento — delegados para recrutamento.js
+  'rec_enviar_form', 'rec_aprovar_m', 'rec_reprovar_m', 'rec_blacklist',
+  'rec_assumir', 'rec_renomear', 'rec_cancel_timer', 'rec_fechar',
+  'modal_rec_fechar', 'modal_rec_renomear', 'modal_rec_aprovar', 'modal_rec_blacklist',
 ]
 
 // ticketContextMap: canal.id → { tipo, openerTag, openerId, userMention, extraData }
@@ -48,18 +52,15 @@ async function _timerInatividade(canal, segundos) {
   // Se já foi fechado manualmente, ticketContextMap não tem mais a entrada
   if (!ticketContextMap.has(canal.id)) return
 
-  const { EmbedBuilder } = require('discord.js')
   try {
     await canal.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle('⏱️ Ticket Fechado por Inatividade')
-          .setDescription(
-            'Este ticket foi fechado automaticamente por inatividade (1h30).\n' +
-            'Se precisar de ajuda, abra um novo ticket.'
-          )
-          .setColor(0xed4245),
-      ],
+      content: (
+        `# ⏱️ Ticket Encerrado por Inatividade\n` +
+        `Este atendimento foi **fechado automaticamente** após 1h30 sem atividade.\n\n` +
+        `> 📄 O transcript será enviado por DM caso tenha havido interação.\n` +
+        `> 💬 Precisando de ajuda? Abra um novo ticket na **Central de Atendimento**.\n\n` +
+        `-# ⏳ Canal excluído em instantes • Omertà — O silêncio é lei.`
+      ),
     })
   } catch { return }
 
@@ -137,9 +138,10 @@ function buildParceriaContent(userMention, proposta = '—', responsavel = 'Agua
 function buildEncerradoContent(userMention) {
   return (
     `# 🔒 Atendimento Encerrado\n` +
-    `> Operador responsável\n` +
-    `> ${userMention}\n\n` +
-    `⏳ Canal será excluído automaticamente em 3 segundos.`
+    `Seu atendimento foi finalizado pelo operador ${userMention}.\n\n` +
+    `> 📄 O transcript completo desta conversa será enviado por DM.\n` +
+    `> 💬 Se não ficou satisfeito, abra um novo ticket em **Suporte Geral**.\n\n` +
+    `-# ⏳ Canal excluído automaticamente em 3 segundos • Omertà — O silêncio é lei.`
   )
 }
 
@@ -219,13 +221,42 @@ function buildTicketButtons(tipo, aceito = false) {
   }
   const cfg = map[tipo] ?? map.suporte
 
+  // ── RECRUTAMENTO ──────────────────────────────────────────────
+  if (tipo === 'recrutamento') {
+    if (aceito) {
+      // Após assumir: linha 1 (Fechar primeiro + Renomear + Timer) + linha 2 (ações)
+      return [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar Ticket').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('rec_renomear').setLabel('✏️ Renomear').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('rec_cancel_timer').setLabel('⏱️ Cancelar Timer').setStyle(ButtonStyle.Secondary),
+        ),
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('rec_enviar_form').setLabel('📋 Enviar Formulário').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('rec_aprovar_m').setLabel('✅ Aprovar Membro').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('rec_reprovar_m').setLabel('❌ Reprovar Membro').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('rec_blacklist').setLabel('🚫 Blacklist').setStyle(ButtonStyle.Danger),
+        ),
+      ]
+    }
+    // Antes de assumir: só linha 1 (Assumir + Fechar)
+    return [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(cfg.aceitarId).setLabel('👤 Assumir Ticket').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar Ticket').setStyle(ButtonStyle.Danger),
+      ),
+    ]
+  }
+
+
+  // ── SUPORTE / ELITE — após aceitar mostra só Fechar ───────────────────────
   if (aceito) {
-    // suporte: após aceitar mostra só o botão Fechar
-    if (tipo === 'suporte') {
+    if (tipo === 'suporte' || tipo === 'elite') {
       return new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
       )
     }
+    // parceria — Assumido desabilitado + Fechar
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(cfg.aceitarId).setLabel('✅ Assumido').setStyle(ButtonStyle.Success).setDisabled(true),
       new ButtonBuilder().setCustomId(cfg.fecharId).setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
@@ -337,14 +368,16 @@ async function execute(interaction) {
         }
         const canal = await criarCanalTicket(guild, user, 'recrutamento')
         ticketContextMap.set(canal.id, { tipo: 'recrutamento', openerTag: user.tag, openerId: user.id, userMention: user.toString(), extraData: null })
-        await canal.send({ content: buildRecContent(user.toString()), components: [buildTicketButtons('recrutamento')] })
+        await canal.send({ content: buildRecContent(user.toString()), components: buildTicketButtons('recrutamento') })
         _timerInatividade(canal, 5400)  // 1h30 — idêntico ao Python
         return interaction.editReply({
           content: (
-            `# 🚀 Ticket Aberto\n` +
-            `Seu canal de suporte foi criado.\n\n` +
-            `> 📁 ${canal}\n\n` +
-            `💡 Explique seu problema com o máximo de detalhes para agilizar o atendimento.`
+            `# 🚀 Processo Seletivo Iniciado\n` +
+            `Seu ticket de recrutamento foi aberto. Leia as instruções no canal e aguarde.\n\n` +
+            `> 📁 ${canal}\n` +
+            `> 🕐 Um recrutador irá assumir seu ticket em breve.\n\n` +
+            `💡 Leia todas as etapas com atenção antes de prosseguir.\n` +
+            `-# ⚠️ Respostas falsas resultam em reprovação automática e possível blacklist.`
           ),
         })
       } catch (err) {
@@ -462,14 +495,16 @@ async function execute(interaction) {
       if (tipo === 'elite')    content = buildEliteContent(user.toString(), extraData)
       if (tipo === 'parceria') content = buildParceriaContent(user.toString(), extraData)
 
-      await canal.send({ content, components: [buildTicketButtons(tipo)] })
+      await canal.send({ content, components: buildTicketButtons(tipo) })
 
       await interaction.editReply({
         content: (
-          `# 🚀 Ticket Aberto\n` +
-          `Seu canal de suporte foi criado.\n\n` +
-          `> 📁 ${canal}\n\n` +
-          `💡 Explique seu problema com o máximo de detalhes para agilizar o atendimento.`
+          `# 🚀 Ticket Aberto com Sucesso\n` +
+          `Seu atendimento foi registrado e nossa equipe irá atendê-lo em breve.\n\n` +
+          `> 📁 ${canal}\n` +
+          `> 🕐 Aguarde um membro da equipe assumir o ticket.\n\n` +
+          `💡 Descreva sua situação com o máximo de detalhes para agilizar o atendimento.\n` +
+          `-# ⚠️ Tickets abertos indevidamente serão encerrados sem aviso.`
         ),
       })
     } catch (err) {
@@ -479,6 +514,17 @@ async function execute(interaction) {
       } catch {}
     }
     return
+  }
+
+  // ── BOTÕES DO SISTEMA DE RECRUTAMENTO — delega para recrutamento.js ─────────
+  const recIds = [
+    'rec_enviar_form', 'rec_aprovar_m', 'rec_reprovar_m', 'rec_blacklist',
+    'rec_assumir', 'rec_renomear', 'rec_cancel_timer', 'rec_fechar',
+    'modal_rec_fechar', 'modal_rec_renomear', 'modal_rec_aprovar', 'modal_rec_blacklist',
+  ]
+  if (recIds.includes(id)) {
+    const recrutamento = require('./recrutamento.js')
+    return recrutamento.execute(interaction)
   }
 
   // ── ACEITAR ───────────────────────────────────────────────────────────────────
@@ -494,16 +540,25 @@ async function execute(interaction) {
     const { tipo, userMention, extraData } = ctx
 
     let novoContent
-    if (tipo === 'recrutamento') novoContent = buildRecContent(userMention, interaction.user.toString())
+    if (tipo === 'recrutamento') {
+      novoContent = buildRecContent(userMention, interaction.user.toString())
+      // Igual ao Python: renomeia o canal com o nome do responsável
+      try {
+        const respBase = interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 12).replace(/-+$/, '') || 'resp'
+        const chBase   = interaction.channel.name.split('-resp-')[0]
+        interaction.channel.setName(`${chBase}-resp-${respBase}`.slice(0, 100)).catch(() => null)
+      } catch {}
+    }
     if (tipo === 'suporte')      novoContent = buildSuporteContent(userMention, extraData, interaction.user.toString())
     if (tipo === 'elite')        novoContent = buildEliteContent(userMention, extraData, interaction.user.toString())
     if (tipo === 'parceria')     novoContent = buildParceriaContent(userMention, extraData, interaction.user.toString())
 
     try {
       await interaction.deferUpdate()
+      const novosBotoes = buildTicketButtons(tipo, true)
       await interaction.message.edit({
         content:    novoContent,
-        components: [buildTicketButtons(tipo, true)],
+        components: Array.isArray(novosBotoes) ? novosBotoes : [novosBotoes],
       })
     } catch (err) {
       console.error('[tickets] Erro ao aceitar:', err)
