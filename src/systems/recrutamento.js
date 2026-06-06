@@ -864,7 +864,7 @@ async function execute(interaction) {
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('modo_import')
-              .setLabel('Modo: "substituir" ou "adicionar" (padrão: adicionar)')
+              .setLabel('Modo: substituir ou adicionar')
               .setStyle(TextInputStyle.Short)
               .setRequired(false)
               .setPlaceholder('adicionar')
