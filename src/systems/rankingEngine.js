@@ -331,37 +331,47 @@ async function _findBotMsg(channel, clientId, identifier) {
 //   guild: Guild do Discord.js
 // ─────────────────────────────────────────────────────────────────────────────
 async function atualizarRanking(tipo, guild) {
-  if (_em_andamento[tipo]) return       // mutex: evita edições paralelas
+  if (_em_andamento[tipo]) {
+    console.log(`[RANK] Mutex ativo para "${tipo}" — ignorando chamada paralela`)
+    return
+  }
   _em_andamento[tipo] = true
+  console.log(`[RANK] Iniciando atualizacao de ranking: "${tipo}"`)
 
   try {
-    // Seleciona canal e builder com base no tipo
     let canalId, payload, identifier
 
     if (tipo === 'recrutadores') {
-      canalId    = REC_CHANNEL_IDS.recrutadores   // '1488347411784007690'
+      canalId    = REC_CHANNEL_IDS.recrutadores
       payload    = buildPayloadRankingRecrutadores(guild)
       identifier = 'RANK_REC'
     } else {
-      // atendentes — usa o mesmo canal de recrutadores (top_tickets)
-      // Você pode separar criando REC_CHANNEL_IDS.top_atendentes no settings.js
-      canalId    = REC_CHANNEL_IDS.top_tickets    // '1488347411784007690'
+      canalId    = REC_CHANNEL_IDS.top_tickets
       payload    = buildPayloadRankingAtendentes(guild)
       identifier = 'RANK_ATD'
     }
 
+    console.log(`[RANK] Canal ID alvo: ${canalId}`)
+
     const channel = guild.channels.cache.get(canalId)
     if (!channel) {
-      console.warn(`[RANK] Canal para "${tipo}" não encontrado: ${canalId}`)
+      console.error(`[RANK] Canal "${tipo}" NAO encontrado no cache: ${canalId}`)
+      console.log(`[RANK] Canais disponiveis: ${guild.channels.cache.map(c => `${c.id}(${c.name})`).join(', ')}`)
       return
     }
+
+    console.log(`[RANK] Canal encontrado: #${channel.name}`)
 
     const existing = await _findBotMsg(channel, guild.client.user.id, identifier)
 
     if (existing) {
+      console.log(`[RANK] Editando mensagem existente: ${existing.id}`)
       await existing.edit(payload)
+      console.log(`[RANK] Ranking "${tipo}" atualizado (edit) OK`)
     } else {
+      console.log(`[RANK] Sem mensagem previa — enviando nova`)
       await channel.send(payload)
+      console.log(`[RANK] Ranking "${tipo}" enviado (send) OK`)
     }
   } catch (err) {
     console.error(`[RANK] Erro ao atualizar ranking "${tipo}":`, err)

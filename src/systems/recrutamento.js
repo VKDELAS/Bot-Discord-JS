@@ -1,1316 +1,391 @@
-// src/systems/recrutamento.js
+// src/systems/rankingEngine.js
+// ─────────────────────────────────────────────────────────────────────────────
+// Motor de ranking compartilhado entre recrutamento.js e tickets.js
+// Garante que apenas UMA atualização rode por vez (mutex por tipo)
+// e que o canal seja encontrado e editado de forma confiável.
+// ─────────────────────────────────────────────────────────────────────────────
 'use strict'
 
 const {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle,
-  StringSelectMenuBuilder, PermissionFlagsBits, ChannelType,
   ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
   MediaGalleryBuilder, MediaGalleryItemBuilder, MessageFlags,
 } = require('discord.js')
+const Database = require('better-sqlite3')
+const moment   = require('moment-timezone')
 
 const {
-  ROLES, ROLE_IDS, MS13_ROLE_ID, CHANNEL_IDS,
-  COLOR_MS13, COLOR_SUCCESS, COLOR_ERROR, COLOR_REC,
-  FOOTER_TEXT, REC_CHANNEL_IDS, _PERM_TICKET_ROLE_ID,
+  BR_TZ, COLOR_REC, COLOR_INFO, COLOR_MS13,
+  FOOTER_TEXT, REC_DB, REC_CHANNEL_IDS,
 } = require('../config/settings.js')
 
-const {
-  getDb, agora,
-  atualizarRanking,
-  buildPayloadRankingRecrutadores,
-  buildPayloadRankingRecrutadoresVazio,
-} = require('./rankingEngine.js')
+const BANNER_REC     = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449213932503130/banner_rec.png?ex=6a242198&is=6a22d018&hm=cc997879c7a773d6dc2aa147c5b01c9f6bd0a9e68d59b7772f068733f6cb4e2b&'
+const BANNER_TICKETS = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449212594520257/banner_tickets.png?ex=6a242198&is=6a22d018&hm=99391c2d19ee698b5ec61e59f15db5147bb360a6d8a033e0b4ea66bd013d5ad2&'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constantes visuais
-// ─────────────────────────────────────────────────────────────────────────────
-const BANNER_REC = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449213932503130/banner_rec.png?ex=6a242198&is=6a22d018&hm=cc997879c7a773d6dc2aa147c5b01c9f6bd0a9e68d59b7772f068733f6cb4e2b&'
-const BANNER_RELATORIO = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449211675705455/banner_relatorio_de_rec.png?ex=6a242198&is=6a22d018&hm=7c6ac939810e4aac185f4563d05e4573ae325d39dca7749317446a6d662f5889&'
-const BANNER_BLACKLIST  = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512449213261156402/Banner_blacklist.png?ex=6a242198&is=6a22d018&hm=01e46996d5da34d6764892d4aa185d2e3e23711bf657b74f52044f12bb3eb120&'
-const BANNER_FORMULARIO = 'https://cdn.discordapp.com/attachments/1489797401039474808/1512454181313839257/Banner_Painel_formulario.png?ex=6a242638&is=6a22d4b8&hm=b6f6c22387111be74771f0cbb0bf9de465e728eddfe27476ac86f65c26f84c9f&'
+function agora() { return moment().tz(BR_TZ).format('DD/MM/YYYY HH:mm') }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers de permissão
-// ─────────────────────────────────────────────────────────────────────────────
-function isStaff(member)      { return ROLES.isento.some(id => member.roles.cache.has(id)) }
-function isRecrutador(member) { return member.roles.cache.has(ROLE_IDS.recrutador) || isStaff(member) }
+// ── Singleton DB ──────────────────────────────────────────────────────────────
+let _db = null
+function getDb() {
+  if (_db) return _db
+  _db = new Database(REC_DB)
+  // Garante que as tabelas existam (idempotente)
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS recrutamentos (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidato_id  TEXT NOT NULL,
+      recrutador_id TEXT,
+      ticket_id     TEXT UNIQUE,
+      status        TEXT DEFAULT 'aberto',
+      criado_em     TEXT DEFAULT (datetime('now','localtime')),
+      fechado_em    TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_candidato_aberto
+      ON recrutamentos(candidato_id) WHERE status = 'aberto';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Mapa temporário para blacklist (user select → confirmar)
-// ─────────────────────────────────────────────────────────────────────────────
-const _blPendente = new Map() // staffId → userId a adicionar
+    CREATE TABLE IF NOT EXISTS atendimentos (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      canal_id        TEXT UNIQUE NOT NULL,
+      atendente_id    TEXT,
+      usuario_id      TEXT NOT NULL,
+      tipo            TEXT NOT NULL DEFAULT 'suporte',
+      status          TEXT NOT NULL DEFAULT 'aberto',
+      criado_em       TEXT DEFAULT (datetime('now','localtime')),
+      assumido_em     TEXT,
+      fechado_em      TEXT
+    );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DB helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function getTicketAberto(candidatoId) {
-  return getDb()
-    .prepare("SELECT * FROM recrutamentos WHERE candidato_id=? AND status='aberto' LIMIT 1")
-    .get(candidatoId)
+    CREATE TABLE IF NOT EXISTS blacklist (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id        TEXT NOT NULL UNIQUE,
+      motivo         TEXT,
+      adicionado_por TEXT,
+      adicionado_em  TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS perguntas (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      texto       TEXT NOT NULL,
+      obrigatoria INTEGER DEFAULT 1,
+      max_chars   INTEGER DEFAULT 500,
+      ordem       INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS respostas_entrevista (
+      canal_id  TEXT PRIMARY KEY,
+      nome_ic   TEXT,
+      id_mta    TEXT
+    );
+  `)
+  return _db
 }
 
-function jaFoiAprovado(candidatoId) {
-  return !!getDb()
-    .prepare("SELECT id FROM recrutamentos WHERE candidato_id=? AND status='aprovado' LIMIT 1")
-    .get(candidatoId)
+// ── Mutex por tipo de ranking ─────────────────────────────────────────────────
+const _em_andamento = { recrutadores: false, atendentes: false }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUILDER — Ranking de Recrutadores (aprovações)
+// ─────────────────────────────────────────────────────────────────────────────
+function buildPayloadRankingRecrutadores(guild) {
+  const db   = getDb()
+  const sep  = new SeparatorBuilder()
+
+  // COUNT(DISTINCT candidato_id) — mesmo candidato não conta 2x
+  const dados = db.prepare(`
+    SELECT recrutador_id,
+           COUNT(DISTINCT candidato_id) AS total
+    FROM   recrutamentos
+    WHERE  recrutador_id IS NOT NULL
+      AND  status = 'aprovado'
+    GROUP  BY recrutador_id
+    ORDER  BY total DESC
+    LIMIT  10
+  `).all()
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLOR_REC)
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(
+        new MediaGalleryItemBuilder().setURL(BANNER_REC)
+      )
+    )
+    .addSeparatorComponents(sep)
+
+  if (dados.length === 0) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 🏆 RANKING DE RECRUTADORES\n\n' +
+        '> Nenhum recrutamento aprovado ainda.\n' +
+        '> As posições serão preenchidas conforme membros forem aprovados.'
+      )
+    )
+  } else {
+    const medalhas = ['🥇', '🥈', '🥉']
+    const nums     = ['4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
+    const top3     = dados.slice(0, 3)
+    const resto    = dados.slice(3)
+
+    let podio = '# 🏆 RANKING DE RECRUTADORES\n\n'
+    for (let i = 0; i < top3.length; i++) {
+      const d      = top3[i]
+      const m      = guild.members.cache.get(d.recrutador_id)
+      const nome   = m ? m.displayName : `<@${d.recrutador_id}>`
+      const plural = d.total === 1 ? 'aprovação' : 'aprovações'
+
+      if (i === 0) {
+        podio +=
+          `${medalhas[0]} **${nome}**\n` +
+          `> ✨ **LÍDER DA COMPETIÇÃO**\n` +
+          `> 📊 **${d.total} ${plural}**\n\n`
+      } else {
+        podio +=
+          `${medalhas[i]} **${nome}**\n` +
+          `> 📊 ${d.total} ${plural}\n\n`
+      }
+    }
+
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(podio.trim())
+    )
+
+    if (resto.length > 0) {
+      let restoText = '\n## 📋 Demais Recrutadores\n\n'
+      for (let i = 0; i < resto.length; i++) {
+        const d      = resto[i]
+        const m      = guild.members.cache.get(d.recrutador_id)
+        const nome   = m ? m.displayName : `<@${d.recrutador_id}>`
+        const plural = d.total === 1 ? 'aprovação' : 'aprovações'
+        restoText += `> ${nums[i] ?? `**${i + 4}.**`} ${nome} — ${d.total} ${plural}\n`
+      }
+      container
+        .addSeparatorComponents(sep)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(restoText.trim()))
+    }
+  }
+
+  container
+    .addSeparatorComponents(sep)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `> 🕐 Atualizado em: **${agora()}**\n` +
+        `-# RANK_REC — ${FOOTER_TEXT}`
+      )
+    )
+
+  return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Painel principal do canal de recrutadores
+// BUILDER — Ranking de Atendentes (tickets fechados)
 // ─────────────────────────────────────────────────────────────────────────────
-function buildPainelRecrutamento() {
+function buildPayloadRankingAtendentes(guild) {
+  const db  = getDb()
+  const sep = new SeparatorBuilder()
+
+  const dados = db.prepare(`
+    SELECT atendente_id,
+           COUNT(DISTINCT canal_id) AS total
+    FROM   atendimentos
+    WHERE  atendente_id IS NOT NULL
+      AND  status = 'fechado'
+    GROUP  BY atendente_id
+    ORDER  BY total DESC
+    LIMIT  10
+  `).all()
+
   const container = new ContainerBuilder()
     .setAccentColor(COLOR_MS13)
     .addMediaGalleryComponents(
       new MediaGalleryBuilder().addItems(
-        new MediaGalleryItemBuilder().setURL(BANNER_REC)
+        new MediaGalleryItemBuilder().setURL(BANNER_TICKETS)
       )
     )
-    .addSeparatorComponents(new SeparatorBuilder())
+    .addSeparatorComponents(sep)
+
+  if (dados.length === 0) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        '# 🎖️ RANKING DE ATENDENTES\n\n' +
+        '> Nenhum atendimento encerrado ainda.\n' +
+        '> As posições serão preenchidas conforme tickets forem fechados.'
+      )
+    )
+  } else {
+    const medalhas = ['🥇', '🥈', '🥉']
+    const nums     = ['4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
+    const top3     = dados.slice(0, 3)
+    const resto    = dados.slice(3)
+
+    let podio = '# 🎖️ RANKING DE ATENDENTES\n\n'
+    for (let i = 0; i < top3.length; i++) {
+      const d      = top3[i]
+      const m      = guild.members.cache.get(d.atendente_id)
+      const nome   = m ? m.displayName : `<@${d.atendente_id}>`
+      const plural = d.total === 1 ? 'atendimento' : 'atendimentos'
+
+      if (i === 0) {
+        podio +=
+          `${medalhas[0]} **${nome}**\n` +
+          `> ✨ **MAIS ATIVO DA EQUIPE**\n` +
+          `> 📊 **${d.total} ${plural} fechados**\n\n`
+      } else {
+        podio +=
+          `${medalhas[i]} **${nome}**\n` +
+          `> 📊 ${d.total} ${plural} fechados\n\n`
+      }
+    }
+
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(podio.trim())
+    )
+
+    if (resto.length > 0) {
+      let restoText = '\n## 📋 Demais Atendentes\n\n'
+      for (let i = 0; i < resto.length; i++) {
+        const d      = resto[i]
+        const m      = guild.members.cache.get(d.atendente_id)
+        const nome   = m ? m.displayName : `<@${d.atendente_id}>`
+        const plural = d.total === 1 ? 'atendimento' : 'atendimentos'
+        restoText += `> ${nums[i] ?? `**${i + 4}.**`} ${nome} — ${d.total} ${plural}\n`
+      }
+      container
+        .addSeparatorComponents(sep)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(restoText.trim()))
+    }
+  }
+
+  container
+    .addSeparatorComponents(sep)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
-        '# 🔫 RECRUTAMENTO — MS-13\n' +
-        '> Sistema oficial de seleção de novos membros da facção.\n' +
-        '> Use os painéis abaixo para gerenciar candidatos e acompanhar o ranking.'
+        `> 🕐 Atualizado em: **${agora()}**\n` +
+        `-# RANK_ATD — ${FOOTER_TEXT}`
       )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        '## 📋 Como funciona\n\n' +
-        '> **1.** Um ticket é aberto quando um candidato entra no processo.\n' +
-        '> **2.** Um recrutador assume e conduz a entrevista.\n' +
-        '> **3.** Após a entrevista, use **Aprovar** ou **Reprovar**.\n' +
-        '> **4.** Aprovações são contabilizadas no ranking em tempo real.'
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Recrutamento`)
     )
 
   return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mensagem inicial do ticket de recrutamento
+// Payloads de reset (visuais)
 // ─────────────────────────────────────────────────────────────────────────────
-function buildTicketAberturaContainer(candidatoId, abertoEm) {
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('rec_fechar').setLabel('🔒 Fechar').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('rec_assumir').setLabel('✋ Assumir').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('rec_renomear').setLabel('✏️ Renomear').setStyle(ButtonStyle.Secondary),
-  )
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('rec_enviar_form').setLabel('📋 Formulário').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('rec_cancel_timer').setLabel('⏹ Cancelar Timer').setStyle(ButtonStyle.Secondary),
-  )
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('rec_aprovar_m').setLabel('✅ Aprovar').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('rec_reprovar_m').setLabel('❌ Reprovar').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('rec_blacklist').setLabel('🚫 Blacklist').setStyle(ButtonStyle.Danger),
-  )
-
+function buildPayloadRankingRecrutadoresVazio() {
+  const sep       = new SeparatorBuilder()
   const container = new ContainerBuilder()
     .setAccentColor(COLOR_REC)
     .addMediaGalleryComponents(
-      new MediaGalleryBuilder().addItems(
-        new MediaGalleryItemBuilder().setURL(BANNER_REC)
-      )
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_REC))
     )
-    .addSeparatorComponents(new SeparatorBuilder())
+    .addSeparatorComponents(sep)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
-        '# 🎫 TICKET DE RECRUTAMENTO\n\n' +
-        `> **Candidato:** <@${candidatoId}>\n` +
-        `> **Responsável:** Aguardando recrutador\n` +
-        `> **Aberto em:** ${abertoEm}\n` +
-        '> **Status:** 🟡 Aguardando atendimento'
+        '# 🏆 RANKING DE RECRUTADORES\n\n' +
+        '> ♻️ **Ranking resetado.**\n> A competição recomeça agora!'
       )
     )
-    .addSeparatorComponents(new SeparatorBuilder())
+    .addSeparatorComponents(sep)
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        '## ⚙️ Ações\n' +
-        '> Use os botões para gerenciar este ticket.\n' +
-        '> ⚠️ A aprovação credita automaticamente no ranking.'
-      )
+      new TextDisplayBuilder().setContent(`-# RANK_REC — ${FOOTER_TEXT}`)
     )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addActionRowComponents(row1)
-    .addActionRowComponents(row2)
-    .addActionRowComponents(row3)
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Ticket de Recrutamento`)
-    )
-
   return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Painel de formulário
-// ─────────────────────────────────────────────────────────────────────────────
-function buildPainelFormularioContainer() {
-  const perguntas = getDb().prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
-
-  const listaTexto = perguntas.length === 0
-    ? '> *Nenhuma pergunta cadastrada ainda.*'
-    : perguntas.map((p, i) =>
-        `> **${i + 1}.** [ID: \`${p.id}\`] ${p.texto}\n` +
-        `> ↳ Obrigatória: ${p.obrigatoria ? '✅' : '❌'} | Máx: ${p.max_chars} chars`
-      ).join('\n\n')
-
+function buildPayloadRankingAtendentesVazio() {
+  const sep       = new SeparatorBuilder()
   const container = new ContainerBuilder()
-    .setAccentColor(COLOR_REC)
+    .setAccentColor(COLOR_MS13)
     .addMediaGalleryComponents(
-      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_FORMULARIO))
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_TICKETS))
     )
-    .addSeparatorComponents(new SeparatorBuilder())
+    .addSeparatorComponents(sep)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
-        '# 📋 PAINEL DE FORMULÁRIO\n' +
-        '> Gerencie as perguntas utilizadas nas entrevistas de recrutamento.'
+        '# 🎖️ RANKING DE ATENDENTES\n\n' +
+        '> ♻️ **Ranking resetado.**\n> A competição recomeça agora!'
       )
     )
-    .addSeparatorComponents(new SeparatorBuilder())
+    .addSeparatorComponents(sep)
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        `## 📝 Perguntas Cadastradas (${perguntas.length})\n\n` + listaTexto
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addActionRowComponents(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('rec_add_q').setLabel('➕ Adicionar').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('rec_edit_q').setLabel('✏️ Editar').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('rec_rem_q').setLabel('🗑 Remover').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('rec_timer_q').setLabel('⏱ Timer').setStyle(ButtonStyle.Secondary),
-      )
-    )
-    .addActionRowComponents(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('rec_view_q').setLabel('👁 Ver').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('rec_refresh_q').setLabel('🔄 Atualizar').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('rec_export_q').setLabel('📤 Exportar').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('rec_import_q').setLabel('📥 Importar').setStyle(ButtonStyle.Primary),
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent('-# PAINEL_FORM — ' + FOOTER_TEXT)
-    )
-
-  return { components: [container], flags: MessageFlags.IsComponentsV2 }
-}
-
-function buildPainelFormulario() { return buildPainelFormularioContainer() }
-
-function buildPainelRelatorio() {
-  const container = new ContainerBuilder()
-    .setAccentColor(COLOR_REC)
-    .addMediaGalleryComponents(
-      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_RELATORIO))
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        '# 📊 RELATÓRIO DE RECRUTAMENTO\n' +
-        '> Gere o relatório de aprovações do seu usuário.'
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addActionRowComponents(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('rec_gerar_rel_v14').setLabel('📊 Gerar Relatório').setStyle(ButtonStyle.Primary)
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Relatórios`)
+      new TextDisplayBuilder().setContent(`-# RANK_ATD — ${FOOTER_TEXT}`)
     )
   return { components: [container], flags: MessageFlags.IsComponentsV2 }
 }
 
-function buildPainelBlacklist() {
-  const container = new ContainerBuilder()
-    .setAccentColor(COLOR_ERROR)
-    .addMediaGalleryComponents(
-      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_BLACKLIST))
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        '# 🚫 BLACKLIST — RECRUTAMENTO\n' +
-        '> Usuários impedidos de participar do processo seletivo.'
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addActionRowComponents(
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('rec_blacklist_v14').setLabel('👁 Ver Blacklist').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('rec_bl_adicionar').setLabel('➕ Adicionar').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('rec_bl_remover').setLabel('🗑️ Remover').setStyle(ButtonStyle.Secondary),
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`-# © MS-13 Roleplay • Blacklist`)
-    )
-  return { components: [container], flags: MessageFlags.IsComponentsV2 }
-}
-
-// compat
-function buildTopRecrutadores(guild) {
-  return Promise.resolve(buildPayloadRankingRecrutadores(guild))
-}
-function buildTopRecrutadoresVazio() {
-  return Promise.resolve(buildPayloadRankingRecrutadoresVazio())
-}
-function buildRecContent(userMention, responsavel) {
-  return `## 🎫 Ticket de Recrutamento\n> **Candidato:** ${userMention}\n> **Responsável:** ${responsavel || 'Aguardando'}\n> **Aberto em:** ${agora()}`
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Atualiza painel do formulário no canal
+// Encontrar mensagem do bot pelo identificador no JSON dos components
 // ─────────────────────────────────────────────────────────────────────────────
-async function _atualizarPainelFormulario(guild, clientId) {
-  const ch = guild.channels.cache.get(REC_CHANNEL_IDS.painel_formulario)
-  if (!ch) return
-  const msgs = await ch.messages.fetch({ limit: 20 })
-  const msg  = msgs.find(m => m.author.id === clientId && JSON.stringify(m.components).includes('PAINEL_FORM'))
-  if (msg) await msg.edit(buildPainelFormularioContainer()).catch(() => null)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Entrevista sequencial
-// ─────────────────────────────────────────────────────────────────────────────
-async function _conduzirEntrevista(channel, candidatoId) {
-  const db        = getDb()
-  const perguntas = db.prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
-  if (perguntas.length === 0) {
-    await channel.send({ content: '⚠️ Nenhuma pergunta cadastrada no formulário.' })
+async function _findBotMsg(channel, clientId, identifier) {
+  try {
+    const msgs = await channel.messages.fetch({ limit: 50 })
+    return msgs.find(m =>
+      m.author.id === clientId &&
+      JSON.stringify(m.components).includes(identifier)
+    ) ?? null
+  } catch {
     return null
   }
-
-  const respostas    = []
-  const msgIdsApagar = [] // todas as msgs de pergunta/resposta/aviso para apagar ao fim
-  let   nome_ic_auto = null
-  let   id_mta_auto  = null
-
-  for (let idx = 0; idx < perguntas.length; idx++) {
-    const p = perguntas[idx]
-
-    const qMsg = await channel.send({
-      content: (
-        `## ❓ Pergunta ${idx + 1}/${perguntas.length}\n\n` +
-        `> ${p.texto}\n\n` +
-        `> ${p.obrigatoria ? '✅ Obrigatória' : '❌ Opcional'} | Máx: ${p.max_chars} chars\n` +
-        `-# ⏳ Você tem **5 minutos** para responder.`
-      ),
-    })
-    msgIdsApagar.push(qMsg.id)
-
-    let respostaValida = false
-    while (!respostaValida) {
-      let coletadas
-      try {
-        coletadas = await channel.awaitMessages({
-          filter: m => m.author.id === candidatoId,
-          max: 1, time: 300_000, errors: ['time'],
-        })
-      } catch {
-        // ✅ Tempo esgotado → reprova imediatamente e fecha o canal
-        await channel.send({
-          content: (
-            `# ⏰ Tempo Esgotado\n` +
-            `Você não respondeu dentro do prazo de **5 minutos**.\n\n` +
-            `> ❌ Candidato **reprovado automaticamente** por inatividade.\n\n` +
-            `-# ⏳ Ticket fechado em 5 segundos • Omertà — O silêncio é lei.`
-          ),
-        })
-        db.prepare("UPDATE recrutamentos SET status='reprovado', fechado_em=datetime('now','localtime') WHERE candidato_id=? AND status='aberto'")
-          .run(candidatoId)
-        await new Promise(r => setTimeout(r, 5_000))
-        await channel.delete().catch(() => null)
-        return null
-      }
-
-      const msgResposta = coletadas.first()
-      const r = msgResposta.content.trim()
-      msgIdsApagar.push(msgResposta.id)
-
-      if (p.obrigatoria && !r) {
-        const av = await channel.send({ content: '⚠️ Esta pergunta é **obrigatória**. Responda para continuar.' })
-        msgIdsApagar.push(av.id)
-        continue
-      }
-      if (r.length > p.max_chars) {
-        const av = await channel.send({ content: `⚠️ Muito longo! Máximo **${p.max_chars}** chars. Sua resposta tem **${r.length}**. Tente novamente.` })
-        msgIdsApagar.push(av.id)
-        continue
-      }
-
-      respostaValida = true
-
-      // Pergunta 1 = nome IC + ID MTA juntos (ex: "João Silva / 1234" ou "João Silva 1234")
-      // Tenta separar pelo padrão: texto / número  OU  texto - número  OU  só o número no fim
-      if (idx === 0) {
-        const match = r.match(/^(.+?)[\s\/\-|]+(\d+)\s*$/)
-        if (match) {
-          nome_ic_auto = match[1].trim()
-          id_mta_auto  = match[2].trim()
-        } else {
-          // Sem número identificável — salva tudo como nome e deixa ID em branco
-          nome_ic_auto = r
-          id_mta_auto  = ''
-        }
-      }
-
-      respostas.push({ pergunta: p.texto, resposta: r || '(sem resposta)' })
-
-      // Confirmação rápida (some em 3s)
-      const conf = await channel.send({ content: `> ✅ Resposta **${idx + 1}/${perguntas.length}** registrada!` })
-      msgIdsApagar.push(conf.id)
-      setTimeout(() => conf.delete().catch(() => null), 3_000)
-    }
-  }
-
-  // ✅ Apaga todas as msgs de pergunta/resposta — deixa só o resumão
-  await channel.bulkDelete(msgIdsApagar, true).catch(async () => {
-    for (const msgId of msgIdsApagar) {
-      await channel.messages.fetch(msgId).then(m => m.delete()).catch(() => null)
-    }
-  })
-
-  // Salva nome IC e ID MTA para pré-preencher o modal de aprovação
-  if (nome_ic_auto || id_mta_auto) {
-    db.prepare('INSERT OR REPLACE INTO respostas_entrevista (canal_id, nome_ic, id_mta) VALUES (?, ?, ?)')
-      .run(channel.id, nome_ic_auto ?? '', id_mta_auto ?? '')
-  }
-
-  return respostas
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Aprovar membro — atualiza ranking ao final
+// DISPATCHER — atualiza um ranking específico no canal correto
+//   tipo: 'recrutadores' | 'atendentes'
+//   guild: Guild do Discord.js
 // ─────────────────────────────────────────────────────────────────────────────
-async function _aprovarMembro(interaction, nomeIC, idMTA) {
-  const guild       = interaction.guild
-  const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-
-  if (!candidatoId) return interaction.editReply({ content: '❌ Candidato não identificado no tópico do canal.' })
-
-  // ✅ Bloqueio anti-duplicação
-  if (jaFoiAprovado(candidatoId)) {
-    return interaction.editReply({
-      content: `⚠️ <@${candidatoId}> **já foi aprovado anteriormente.** Ação bloqueada para evitar duplicação no ranking.`,
-    })
-  }
-
-  const member = await guild.members.fetch(candidatoId).catch(() => null)
-  if (!member) return interaction.editReply({ content: '❌ Candidato não encontrado no servidor.' })
-
-  const novoNick = `Ⓜ・ ${nomeIC} ${idMTA}`
-  const erros = []
-
-  await member.setNickname(novoNick).catch(e => erros.push(`nick: ${e.message}`))
-
-  const rolesAdicionar = [ROLE_IDS.etapa2, ROLE_IDS.membro, MS13_ROLE_ID].filter(Boolean)
-  await member.roles.add(rolesAdicionar).catch(e => erros.push(`cargo: ${e.message}`))
-
-  const db = getDb()
-  const res = db.prepare(`
-    UPDATE recrutamentos
-    SET status='aprovado', recrutador_id=?, fechado_em=datetime('now','localtime')
-    WHERE candidato_id=? AND status='aberto'
-  `).run(interaction.user.id, candidatoId)
-
-  // Edge case: ticket aberto fora do sistema normal
-  if (res.changes === 0) {
-    db.prepare(`
-      INSERT INTO recrutamentos (candidato_id, recrutador_id, ticket_id, status, fechado_em)
-      VALUES (?, ?, ?, 'aprovado', datetime('now','localtime'))
-    `).run(candidatoId, interaction.user.id, interaction.channel.id)
-  }
-
-  // Log
-  const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_recrutamento)
-  if (logCh) {
-    const logBox = new ContainerBuilder()
-      .setAccentColor(COLOR_SUCCESS)
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(
-          '## ✅ NOVO MEMBRO APROVADO\n\n' +
-          `> **Candidato:** <@${candidatoId}>\n` +
-          `> **Aprovado por:** <@${interaction.user.id}>\n` +
-          `> **Nick:** \`${novoNick}\`\n` +
-          `> **Data:** ${agora()}`
-        )
-      )
-    await logCh.send({ components: [logBox], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
-  }
-
-  // Resposta no ticket
-  const aprovBox = new ContainerBuilder()
-    .setAccentColor(COLOR_SUCCESS)
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        '## ✅ MEMBRO APROVADO!\n\n' +
-        `> ${member} foi aprovado como **Morador** da MS-13.\n` +
-        `> **Nick:** \`${novoNick}\`\n` +
-        '> Bem-vindo à família! 🔫'
-      )
-    )
-  // Adiciona erros de hierarquia ao embed se houver
-  if (erros.length > 0) {
-    const temHierarquia = erros.some(e => e.includes('50013') || e.includes('Missing Permissions'))
-    await interaction.followUp({
-      content: temHierarquia
-        ? '⚠️ Nick/Cargo não aplicado — bot sem hierarquia suficiente. Suba o cargo do bot acima dos membros.'
-        : `⚠️ Erros: ${erros.join(', ')}`,
-      ephemeral: true,
-    }).catch(() => null)
-  }
-
-  await interaction.editReply({ components: [aprovBox], flags: MessageFlags.IsComponentsV2 })
-
-  // DM ao candidato — igual ao Python AprovarMembroModal
-  member.send({
-    embeds: [{
-      title: '✅ Aprovado — 1ª Fase | MS-13',
-      description: `Parabéns, **${nomeIC}**! Você foi aprovado na 1ª fase!\n\n🏷️ Nick: \`${novoNick}\`\n🎖️ Cargo: **♱ 2ª Etapa**\n\nVá para o canal de voz **AGUARDANDO**. 🔵`,
-      color: 0x2ECC71,
-    }],
-  }).catch(() => null) // ignora se DM fechada
-
-  // ✅ ATUALIZA RANKING EM TEMPO REAL
-  await atualizarRanking('recrutadores', guild)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Handler principal (interactions)
-// ─────────────────────────────────────────────────────────────────────────────
-async function execute(interaction) {
-  const id = interaction.customId
-
-  // ── Fechar ────────────────────────────────────────────────────────────────
-  if (id === 'rec_fechar') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Apenas staff pode fechar tickets.', ephemeral: true })
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_fechar').setTitle('Fechar Ticket').addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('motivo_fechar').setLabel('Motivo do fechamento').setStyle(TextInputStyle.Paragraph).setRequired(true)
-        )
-      )
-    )
-  }
-
-  if (id === 'modal_rec_fechar') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply()
-    const motivo      = interaction.fields.getTextInputValue('motivo_fechar')
-    const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (candidatoId) {
-      getDb().prepare("UPDATE recrutamentos SET status='fechado', fechado_em=datetime('now','localtime') WHERE candidato_id=? AND status='aberto'").run(candidatoId)
-    }
-    const box = new ContainerBuilder()
-      .setAccentColor(COLOR_ERROR)
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(
-          `## 🔒 TICKET FECHADO\n\n> **Por:** <@${interaction.user.id}>\n> **Motivo:** ${motivo}\n> **Data:** ${agora()}`
-        )
-      )
-    await interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
-    setTimeout(() => interaction.channel.delete().catch(() => null), 5_000)
+async function atualizarRanking(tipo, guild) {
+  if (_em_andamento[tipo]) {
+    console.log(`[RANK] Mutex ativo para "${tipo}" — ignorando chamada paralela`)
     return
   }
+  _em_andamento[tipo] = true
+  console.log(`[RANK] Iniciando atualizacao de ranking: "${tipo}"`)
 
-  // ── Assumir ───────────────────────────────────────────────────────────────
-  if (id === 'rec_assumir') {
-    if (!isRecrutador(interaction.member))
-      return interaction.reply({ content: '❌ Apenas recrutadores podem assumir tickets.', ephemeral: true })
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply()
-    const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (candidatoId) {
-      getDb().prepare("UPDATE recrutamentos SET recrutador_id=? WHERE candidato_id=? AND status='aberto'").run(interaction.user.id, candidatoId)
-    }
-    const box = new ContainerBuilder()
-      .setAccentColor(COLOR_SUCCESS)
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(`> ✅ <@${interaction.user.id}> assumiu este ticket.`)
-      )
-    return interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
-  }
+  try {
+    let canalId, payload, identifier
 
-  // ── Renomear ──────────────────────────────────────────────────────────────
-  if (id === 'rec_renomear') {
-    if (!isRecrutador(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_renomear').setTitle('Renomear Canal').addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('novo_nome').setLabel('Novo nome do canal').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90)
-        )
-      )
-    )
-  }
-
-  if (id === 'modal_rec_renomear') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const nome = interaction.fields.getTextInputValue('novo_nome').toLowerCase().replace(/\s+/g, '-')
-    await interaction.channel.setName(nome).catch(() => null)
-    return interaction.editReply({ content: `✅ Canal renomeado para **${nome}**.` })
-  }
-
-  // ── Formulário (entrevista) ───────────────────────────────────────────────
-  if (id === 'rec_enviar_form') {
-    if (!isRecrutador(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (!candidatoId) return interaction.editReply({ content: '❌ Candidato não identificado.' })
-    await interaction.editReply({ content: '✅ Iniciando entrevista...' })
-    const respostas = await _conduzirEntrevista(interaction.channel, candidatoId)
-    if (!respostas) return
-    const listaRespostas = respostas
-      .map((r, i) => `**${i + 1}. ${r.pergunta}**\n> ${r.resposta}`)
-      .join('\n\n')
-
-    await interaction.channel.send({
-      content: (
-        `# 📋 Formulário Concluído — MS-13\n` +
-        `Todas as respostas foram registradas. Aguarde a análise da liderança.\n\n` +
-        `> 👤 **Candidato:** <@${candidatoId}>\n` +
-        `> 📅 **Data:** ${agora()}\n\n` +
-        `${listaRespostas}\n\n` +
-        `-# ✅ Respostas enviadas • Não saia do ticket, aguarde o resultado.`
-      ),
-    })
-    return
-  }
-
-  if (id === 'rec_cancel_timer') {
-    return interaction.reply({ content: '⏹ Timer cancelado.', ephemeral: true })
-  }
-
-  // ── Aprovar ───────────────────────────────────────────────────────────────
-  if (id === 'rec_aprovar_m') {
-    if (!isRecrutador(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    // Pré-preenche com nome IC e ID MTA capturados automaticamente do formulário
-    const salvo = getDb()
-      .prepare('SELECT nome_ic, id_mta FROM respostas_entrevista WHERE canal_id=? LIMIT 1')
-      .get(interaction.channel.id)
-
-    return interaction.showModal(
-      new ModalBuilder()
-        .setCustomId('modal_rec_aprovar')
-        .setTitle('✅ Aprovar Membro — 1ª Fase')
-        .addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('nome_ic')
-              .setLabel('Nome IC do personagem')
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-              .setValue(salvo?.nome_ic ?? '')
-          ),
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('id_mta')
-              .setLabel('ID MTA do personagem')
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-              .setValue(salvo?.id_mta ?? '')
-          )
-        )
-    )
-  }
-
-  if (id === 'modal_rec_aprovar') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply()
-    return _aprovarMembro(
-      interaction,
-      interaction.fields.getTextInputValue('nome_ic').trim(),
-      interaction.fields.getTextInputValue('id_mta').trim()
-    )
-  }
-
-  // ── Reprovar ──────────────────────────────────────────────────────────────
-  if (id === 'rec_reprovar_m') {
-    if (!isRecrutador(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply()
-    const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (candidatoId) {
-      getDb().prepare("UPDATE recrutamentos SET status='reprovado', fechado_em=datetime('now','localtime') WHERE candidato_id=? AND status='aberto'").run(candidatoId)
-    }
-    const box = new ContainerBuilder()
-      .setAccentColor(COLOR_ERROR)
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(
-          `## ❌ CANDIDATO REPROVADO\n\n> **Candidato:** <@${candidatoId}>\n> **Por:** <@${interaction.user.id}>\n> **Data:** ${agora()}`
-        )
-      )
-    await interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
-    setTimeout(() => interaction.channel.delete().catch(() => null), 8_000)
-    return
-  }
-
-  // ── Blacklist ─────────────────────────────────────────────────────────────
-  if (id === 'rec_blacklist') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_blacklist').setTitle('Adicionar à Blacklist').addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('motivo_bl').setLabel('Motivo').setStyle(TextInputStyle.Paragraph).setRequired(true)
-        )
-      )
-    )
-  }
-
-  if (id === 'modal_rec_blacklist') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply()
-    const motivo      = interaction.fields.getTextInputValue('motivo_bl')
-    const candidatoId = interaction.channel.topic?.match(/\d{17,19}/)?.[0]
-    if (!candidatoId) return interaction.editReply({ content: '❌ Candidato não identificado.' })
-    getDb().prepare('INSERT OR REPLACE INTO blacklist (user_id, motivo, adicionado_por) VALUES (?, ?, ?)').run(candidatoId, motivo, interaction.user.id)
-    const blCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.blacklist)
-    if (blCh) {
-      await blCh.send({
-        components: [
-          new ContainerBuilder().setAccentColor(COLOR_ERROR).addTextDisplayComponents(
-            new TextDisplayBuilder().setContent(
-              `## 🚫 ADICIONADO À BLACKLIST\n\n> **Usuário:** <@${candidatoId}>\n> **Por:** <@${interaction.user.id}>\n> **Motivo:** ${motivo}\n> **Data:** ${agora()}`
-            )
-          ),
-        ],
-        flags: MessageFlags.IsComponentsV2,
-      }).catch(() => null)
-    }
-    const box = new ContainerBuilder()
-      .setAccentColor(COLOR_ERROR)
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(`## 🚫 BLACKLIST\n\n> <@${candidatoId}> foi adicionado à blacklist.\n> **Motivo:** ${motivo}`)
-      )
-    await interaction.editReply({ components: [box], flags: MessageFlags.IsComponentsV2 })
-    setTimeout(() => interaction.channel.delete().catch(() => null), 8_000)
-    return
-  }
-
-  // ── Gerar ticket manualmente ──────────────────────────────────────────────
-  if (id === 'rec_gerar_tkt') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const { guild }     = interaction
-    const candidatoId   = interaction.user.id
-
-    // ✅ Anti-duplicação
-    const existente = getTicketAberto(candidatoId)
-    if (existente) {
-      const canal = guild.channels.cache.get(existente.ticket_id)
-      return interaction.editReply({
-        content: canal
-          ? `⚠️ Já existe ticket aberto: ${canal}. Feche-o antes.`
-          : '⚠️ Já existe um ticket em aberto no banco. Feche-o antes.',
-      })
-    }
-    const naBl = getDb().prepare('SELECT id FROM blacklist WHERE user_id=?').get(candidatoId)
-    if (naBl) return interaction.editReply({ content: '🚫 Usuário está na blacklist.' })
-
-    const cat    = REC_CHANNEL_IDS.categoria_rec !== '0' ? guild.channels.cache.get(REC_CHANNEL_IDS.categoria_rec) : null
-    const novoCanal = await guild.channels.create({
-      name:  `rec-${interaction.user.username}-${Date.now().toString().slice(-4)}`,
-      type:  ChannelType.GuildText,
-      parent: cat ?? undefined,
-      topic: `Candidato: ${candidatoId}`,
-      permissionOverwrites: [
-        { id: guild.id,              deny:  [PermissionFlagsBits.ViewChannel] },
-        { id: candidatoId,           allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-        { id: _PERM_TICKET_ROLE_ID,  allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-      ],
-    })
-    getDb().prepare("INSERT OR IGNORE INTO recrutamentos (candidato_id, ticket_id, status) VALUES (?, ?, 'aberto')").run(candidatoId, novoCanal.id)
-    await novoCanal.send(buildTicketAberturaContainer(candidatoId, agora()))
-    return interaction.editReply({ content: `✅ Ticket criado: ${novoCanal}` })
-  }
-
-  // ── Gerenciamento de perguntas ────────────────────────────────────────────
-  if (id === 'rec_add_q') {
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_add_q').setTitle('Adicionar Pergunta').addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('texto').setLabel('Texto da pergunta').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('max_chars').setLabel('Máx. caracteres (padrão 500)').setStyle(TextInputStyle.Short).setRequired(false)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('obrigatoria').setLabel('Obrigatória? (sim/não)').setStyle(TextInputStyle.Short).setRequired(false)),
-      )
-    )
-  }
-  if (id === 'modal_rec_add_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const texto       = interaction.fields.getTextInputValue('texto').trim()
-    const maxChars    = parseInt(interaction.fields.getTextInputValue('max_chars')) || 500
-    const obRaw       = interaction.fields.getTextInputValue('obrigatoria').trim().toLowerCase()
-    const obrigatoria = (obRaw === 'não' || obRaw === 'nao' || obRaw === 'n') ? 0 : 1
-    const db          = getDb()
-    const ordem       = (db.prepare('SELECT MAX(ordem) AS m FROM perguntas').get()?.m ?? 0) + 1
-    db.prepare('INSERT INTO perguntas (texto, obrigatoria, max_chars, ordem) VALUES (?, ?, ?, ?)').run(texto, obrigatoria, maxChars, ordem)
-    await interaction.editReply({ content: '✅ Pergunta adicionada!' })
-    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
-    return
-  }
-
-  if (id === 'rec_edit_q') {
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_edit_q').setTitle('Editar Pergunta').addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('id_p').setLabel('ID da pergunta').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('novo_texto').setLabel('Novo texto').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-      )
-    )
-  }
-  if (id === 'modal_rec_edit_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const r = getDb().prepare('UPDATE perguntas SET texto=? WHERE id=?').run(
-      interaction.fields.getTextInputValue('novo_texto').trim(),
-      parseInt(interaction.fields.getTextInputValue('id_p'))
-    )
-    if (r.changes === 0) return interaction.editReply({ content: '❌ Pergunta não encontrada. Verifique o ID.' })
-    await interaction.editReply({ content: '✅ Pergunta editada!' })
-    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
-    return
-  }
-
-  if (id === 'rec_rem_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const perguntas = getDb().prepare('SELECT id, texto FROM perguntas ORDER BY ordem ASC').all()
-    if (perguntas.length === 0) return interaction.editReply({ content: '❌ Nenhuma pergunta cadastrada.' })
-    return interaction.editReply({
-      content: 'Selecione a pergunta a remover:',
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('rec_select_rem_q')
-            .setPlaceholder('Selecione a pergunta')
-            .addOptions(perguntas.slice(0, 25).map(p => ({ label: p.texto.slice(0, 100), value: String(p.id) })))
-        ),
-      ],
-    })
-  }
-  if (id === 'rec_select_rem_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const r = getDb().prepare('DELETE FROM perguntas WHERE id=?').run(parseInt(interaction.values[0]))
-    if (r.changes > 0) {
-      await interaction.editReply({ content: '✅ Pergunta removida!', components: [] })
-      await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
+    if (tipo === 'recrutadores') {
+      canalId    = REC_CHANNEL_IDS.recrutadores
+      payload    = buildPayloadRankingRecrutadores(guild)
+      identifier = 'RANK_REC'
     } else {
-      await interaction.editReply({ content: '❌ Pergunta não encontrada.', components: [] })
-    }
-    return
-  }
-
-  if (id === 'rec_timer_q') return interaction.reply({ content: '⚠️ Timer configurável via `/painel-formulario`.', ephemeral: true })
-
-  if (id === 'rec_view_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    return interaction.editReply(buildPainelFormularioContainer())
-  }
-  if (id === 'rec_refresh_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
-    return interaction.editReply({ content: '✅ Painel atualizado!' })
-  }
-  if (id === 'rec_export_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const perguntas = getDb().prepare('SELECT * FROM perguntas ORDER BY ordem ASC').all()
-    return interaction.editReply({
-      content: '📤 Exportação:',
-      files: [{ attachment: Buffer.from(JSON.stringify(perguntas, null, 2), 'utf8'), name: 'perguntas.json' }],
-    })
-  }
-
-  if (id === 'rec_import_q') {
-    return interaction.showModal(
-      new ModalBuilder()
-        .setCustomId('modal_rec_import_q')
-        .setTitle('📥 Importar Perguntas (JSON)')
-        .addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('json_perguntas')
-              .setLabel('Cole o JSON das perguntas aqui')
-              .setStyle(TextInputStyle.Paragraph)
-              .setRequired(true)
-              .setPlaceholder('[{"id":1,"texto":"Pergunta?","obrigatoria":1,"max_chars":500,"ordem":1}]')
-          ),
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId('modo_import')
-              .setLabel('Modo: substituir ou adicionar')
-              .setStyle(TextInputStyle.Short)
-              .setRequired(false)
-              .setPlaceholder('adicionar')
-          )
-        )
-    )
-  }
-
-  if (id === 'modal_rec_import_q') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-
-    let parsed
-    try {
-      const raw = interaction.fields.getTextInputValue('json_perguntas').trim()
-      parsed = JSON.parse(raw)
-      if (!Array.isArray(parsed)) throw new Error('JSON deve ser um array')
-    } catch (e) {
-      return interaction.editReply({ content: `❌ JSON inválido: ${e.message}` })
+      canalId    = REC_CHANNEL_IDS.top_tickets
+      payload    = buildPayloadRankingAtendentes(guild)
+      identifier = 'RANK_ATD'
     }
 
-    const modoRaw = interaction.fields.getTextInputValue('modo_import').trim().toLowerCase()
-    const substituir = modoRaw === 'substituir'
+    console.log(`[RANK] Canal ID alvo: ${canalId}`)
 
-    const db = getDb()
-
-    if (substituir) {
-      db.prepare('DELETE FROM perguntas').run()
+    const channel = guild.channels.cache.get(canalId)
+    if (!channel) {
+      console.error(`[RANK] Canal "${tipo}" NAO encontrado no cache: ${canalId}`)
+      console.log(`[RANK] Canais disponiveis: ${guild.channels.cache.map(c => `${c.id}(${c.name})`).join(', ')}`)
+      return
     }
 
-    const ordemAtual = substituir
-      ? 0
-      : (db.prepare('SELECT MAX(ordem) AS m FROM perguntas').get()?.m ?? 0)
+    console.log(`[RANK] Canal encontrado: #${channel.name}`)
 
-    const stmt = db.prepare(
-      'INSERT INTO perguntas (texto, obrigatoria, max_chars, ordem) VALUES (?, ?, ?, ?)'
-    )
+    const existing = await _findBotMsg(channel, guild.client.user.id, identifier)
 
-    let importadas = 0
-    let erros = 0
-    for (let i = 0; i < parsed.length; i++) {
-      const p = parsed[i]
-      if (!p.texto) { erros++; continue }
-      const obrigatoria = p.obrigatoria !== undefined ? (p.obrigatoria ? 1 : 0) : 1
-      const maxChars    = Number(p.max_chars) || 500
-      const ordem       = ordemAtual + i + 1
-      try {
-        stmt.run(p.texto.trim(), obrigatoria, maxChars, ordem)
-        importadas++
-      } catch {
-        erros++
-      }
-    }
-
-    await interaction.editReply({
-      content: (
-        `✅ Importação concluída!\n\n` +
-        `> 📥 **Importadas:** ${importadas}\n` +
-        `> ⚠️ **Ignoradas (sem texto):** ${erros}\n` +
-        `> 📋 **Modo:** ${substituir ? 'Substituição total' : 'Adicionadas ao final'}\n\n` +
-        `-# IDs originais do JSON são ignorados — novos IDs são gerados automaticamente pelo banco.`
-      ),
-    })
-    await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
-    return
-  }
-
-  // ── Relatório ─────────────────────────────────────────────────────────────
-  if (id === 'rec_gerar_rel_v14') {
-    if (!isRecrutador(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    return interaction.showModal(
-      new ModalBuilder().setCustomId('modal_rec_relatorio').setTitle('Gerar Relatório').addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('obs').setLabel('Observações (opcional)').setStyle(TextInputStyle.Paragraph).setRequired(false)
-        )
-      )
-    )
-  }
-  if (id === 'modal_rec_relatorio') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const obs  = interaction.fields.getTextInputValue('obs').trim()
-    const uid  = interaction.user.id
-    const db   = getDb()
-    const tot  = db.prepare("SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=?").get(uid)?.c ?? 0
-    const aprov = db.prepare("SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=? AND status='aprovado'").get(uid)?.c ?? 0
-    const repr  = db.prepare("SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=? AND status='reprovado'").get(uid)?.c ?? 0
-    const box = new ContainerBuilder()
-      .setAccentColor(COLOR_REC)
-      .addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_REC)))
-      .addSeparatorComponents(new SeparatorBuilder())
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(
-          `## 📊 RELATÓRIO — ${interaction.user.displayName}\n\n` +
-          `> **Atendidos:** \`${tot}\`\n> **Aprovações:** \`${aprov}\`\n> **Reprovações:** \`${repr}\`\n` +
-          (obs ? `> **Obs:** ${obs}` : '') +
-          `\n\n-# Gerado em ${agora()} | ${FOOTER_TEXT}`
-        )
-      )
-    const relCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.relatorio_rec)
-    const logCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.logs_relatorios_rec)
-    if (relCh) await relCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
-    if (logCh) await logCh.send({ components: [box], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
-    return interaction.editReply({ content: '✅ Relatório gerado!' })
-  }
-
-  // ── Ver blacklist ─────────────────────────────────────────────────────────
-  if (id === 'rec_blacklist_v14') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-
-    const lista = getDb().prepare('SELECT * FROM blacklist ORDER BY adicionado_em DESC').all()
-
-    if (lista.length === 0) {
-      const vazioBox = new ContainerBuilder()
-        .setAccentColor(COLOR_ERROR)
-        .addMediaGalleryComponents(
-          new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_BLACKLIST))
-        )
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent(
-            '# 🚫 BLACKLIST — MS-13\n\n' +
-            '> ✅ Nenhum usuário na blacklist no momento.\n\n' +
-            `-# ${FOOTER_TEXT}`
-          )
-        )
-      return interaction.editReply({ components: [vazioBox], flags: MessageFlags.IsComponentsV2 })
-    }
-
-    // Divide em chunks de 10 para não estourar o limite de caracteres
-    const chunks = []
-    for (let i = 0; i < lista.length; i += 10) chunks.push(lista.slice(i, i + 10))
-
-    const container = new ContainerBuilder()
-      .setAccentColor(COLOR_ERROR)
-      .addMediaGalleryComponents(
-        new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_BLACKLIST))
-      )
-      .addSeparatorComponents(new SeparatorBuilder())
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(
-          `# 🚫 BLACKLIST — MS-13\n` +
-          `Lista de usuários impedidos de participar do processo seletivo.\n\n` +
-          `> 📊 **Total na blacklist:** ${lista.length} usuário(s)`
-        )
-      )
-
-    for (const chunk of chunks) {
-      container
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent(
-            chunk.map((e, i) => {
-              const idx = lista.indexOf(e) + 1
-              return (
-                `**${idx}.** <@${e.user_id}>\n` +
-                `> ❌ **Motivo:** ${e.motivo || 'Não informado'}\n` +
-                `> 👤 **Por:** <@${e.adicionado_por}>\n` +
-                `> 📅 **Em:** ${e.adicionado_em}`
-              )
-            }).join('\n\n')
-          )
-        )
-    }
-
-    container
-      .addSeparatorComponents(new SeparatorBuilder())
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(`-# 🚫 Blacklist MS-13 • ${FOOTER_TEXT}`)
-      )
-
-    return interaction.editReply({ components: [container], flags: MessageFlags.IsComponentsV2 })
-  }
-
-  // ── Adicionar à blacklist — user select (sem digitar ID) ──────────────────
-  if (id === 'rec_bl_adicionar') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    const { UserSelectMenuBuilder } = require('discord.js')
-    return interaction.reply({
-      content: (
-        `# 🚫 Adicionar à Blacklist\n` +
-        `Selecione o usuário que deseja adicionar à blacklist do recrutamento.\n\n` +
-        `> ⚠️ Ele não poderá abrir tickets de recrutamento enquanto estiver na lista.`
-      ),
-      components: [
-        new ActionRowBuilder().addComponents(
-          new UserSelectMenuBuilder()
-            .setCustomId('rec_bl_user_select')
-            .setPlaceholder('👤 Selecione o usuário...')
-            .setMinValues(1)
-            .setMaxValues(1)
-        ),
-      ],
-      ephemeral: true,
-    })
-  }
-
-  if (id === 'rec_bl_user_select') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    const userId    = interaction.values[0]
-    const membro    = await interaction.guild.members.fetch(userId).catch(() => null)
-    const nome      = membro ? membro.displayName : `<@${userId}>`
-    const jaEsta    = getDb().prepare('SELECT motivo FROM blacklist WHERE user_id=?').get(userId)
-
-    if (jaEsta) {
-      return interaction.update({
-        content: (
-          `# ⚠️ Usuário já na Blacklist\n` +
-          `**${nome}** já está na blacklist.\n\n` +
-          `> ❌ **Motivo atual:** ${jaEsta.motivo}`
-        ),
-        components: [],
-      })
-    }
-
-    _blPendente.set(interaction.user.id, userId)
-
-    return interaction.update({
-      content: (
-        `# 🚫 Confirmar Blacklist\n` +
-        `Você está prestes a adicionar **${nome}** à blacklist.\n\n` +
-        `> ❌ Ele não poderá abrir tickets de recrutamento.\n` +
-        `> ⚠️ Esta ação pode ser revertida manualmente no banco de dados.\n\n` +
-        `Tem certeza?`
-      ),
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('rec_bl_confirmar')
-            .setLabel('✅ Confirmar Blacklist')
-            .setStyle(ButtonStyle.Danger),
-          new ButtonBuilder()
-            .setCustomId('rec_bl_cancelar')
-            .setLabel('❌ Cancelar')
-            .setStyle(ButtonStyle.Secondary),
-        ),
-      ],
-    })
-  }
-
-  if (id === 'rec_bl_confirmar') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    const userId = _blPendente.get(interaction.user.id)
-    if (!userId) return interaction.update({ content: '❌ Sessão expirada. Tente novamente.', components: [] })
-    _blPendente.delete(interaction.user.id)
-    const membro = await interaction.guild.members.fetch(userId).catch(() => null)
-    const nome   = membro ? membro.displayName : `<@${userId}>`
-
-    getDb().prepare('INSERT OR REPLACE INTO blacklist (user_id, motivo, adicionado_por) VALUES (?, ?, ?)')
-      .run(userId, 'Adicionado via painel de blacklist', interaction.user.id)
-
-    // Log no canal de blacklist
-    const blCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.blacklist)
-    if (blCh) {
-      const logBox = new ContainerBuilder()
-        .setAccentColor(COLOR_ERROR)
-        .addMediaGalleryComponents(
-          new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(BANNER_BLACKLIST))
-        )
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent(
-            `# 🚫 NOVO NA BLACKLIST\n\n` +
-            `> 👤 **Usuário:** <@${userId}>\n` +
-            `> 🛡️ **Adicionado por:** <@${interaction.user.id}>\n` +
-            `> 📅 **Data:** ${agora()}\n\n` +
-            `-# 🚫 Blacklist MS-13 • ${FOOTER_TEXT}`
-          )
-        )
-      await blCh.send({ components: [logBox], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
-    }
-
-    return interaction.update({
-      content: (
-        `# ✅ Adicionado à Blacklist\n` +
-        `**${nome}** foi adicionado à blacklist com sucesso.\n\n` +
-        `> ❌ Ele não poderá abrir novos tickets de recrutamento.\n\n` +
-        `-# 🚫 Blacklist MS-13 • ${FOOTER_TEXT}`
-      ),
-      components: [],
-    })
-  }
-
-  if (id === 'rec_bl_remover') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    const lista = getDb().prepare('SELECT user_id, motivo FROM blacklist ORDER BY adicionado_em DESC').all()
-
-    if (lista.length === 0) {
-      return interaction.reply({ content: '✅ A blacklist está vazia, nada para remover.', ephemeral: true })
-    }
-
-    // Busca nome dos membros do servidor para mostrar no select
-    const opcoes = []
-    for (const entry of lista.slice(0, 25)) {
-      const membro = interaction.guild.members.cache.get(entry.user_id)
-        || await interaction.guild.members.fetch(entry.user_id).catch(() => null)
-      const nome   = membro ? membro.displayName : `ID: ${entry.user_id}`
-      const motivo = (entry.motivo || 'Sem motivo').slice(0, 50)
-      opcoes.push({
-        label:       nome.slice(0, 100),
-        description: `Motivo: ${motivo}`,
-        value:       entry.user_id,
-      })
-    }
-
-    return interaction.reply({
-      content: (
-        `# 🗑️ Remover da Blacklist\n` +
-        `Selecione o usuário que deseja **remover**. Apenas quem está na blacklist aparece aqui.\n\n` +
-        `> ⚠️ Após a remoção ele poderá abrir tickets de recrutamento novamente.`
-      ),
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('rec_bl_remover_select')
-            .setPlaceholder('👤 Selecione o usuário para remover...')
-            .addOptions(opcoes)
-        ),
-      ],
-      ephemeral: true,
-    })
-  }
-
-  if (id === 'rec_bl_remover_select') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    const userId  = interaction.values[0]
-    const naBl    = getDb().prepare('SELECT motivo FROM blacklist WHERE user_id=?').get(userId)
-    const membro  = await interaction.guild.members.fetch(userId).catch(() => null)
-    const nome    = membro ? membro.displayName : `<@${userId}>`
-
-    _blPendente.set(`rm_${interaction.user.id}`, userId)
-
-    return interaction.update({
-      content: (
-        `# 🗑️ Confirmar Remoção\n` +
-        `Você está prestes a **remover** **${nome}** da blacklist.\n\n` +
-        `> 📋 **Motivo original:** ${naBl.motivo || 'Não informado'}\n` +
-        `> ✅ Ele poderá abrir tickets de recrutamento novamente.\n\n` +
-        `Tem certeza?`
-      ),
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('rec_bl_remover_confirmar').setLabel('✅ Confirmar Remoção').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('rec_bl_cancelar').setLabel('❌ Cancelar').setStyle(ButtonStyle.Secondary),
-        ),
-      ],
-    })
-  }
-
-  if (id === 'rec_bl_remover_confirmar') {
-    if (!isStaff(interaction.member))
-      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
-
-    const userId = _blPendente.get(`rm_${interaction.user.id}`)
-    if (!userId) return interaction.update({ content: '❌ Sessão expirada. Tente novamente.', components: [] })
-    _blPendente.delete(`rm_${interaction.user.id}`)
-
-    getDb().prepare('DELETE FROM blacklist WHERE user_id=?').run(userId)
-
-    const membro = await interaction.guild.members.fetch(userId).catch(() => null)
-    const nome   = membro ? membro.displayName : `<@${userId}>`
-
-    // Log no canal de blacklist
-    const blCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.blacklist)
-    if (blCh) {
-      const logBox = new ContainerBuilder()
-        .setAccentColor(COLOR_SUCCESS)
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent(
-            `# ✅ REMOVIDO DA BLACKLIST\n\n` +
-            `> 👤 **Usuário:** <@${userId}>\n` +
-            `> 🛡️ **Removido por:** <@${interaction.user.id}>\n` +
-            `> 📅 **Data:** ${agora()}\n\n` +
-            `-# ✅ Blacklist MS-13 • ${FOOTER_TEXT}`
-          )
-        )
-      await blCh.send({ components: [logBox], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
-    }
-
-    return interaction.update({
-      content: (
-        `# ✅ Removido da Blacklist\n` +
-        `**${nome}** foi removido da blacklist com sucesso.\n\n` +
-        `> ✅ Ele pode abrir tickets de recrutamento novamente.\n\n` +
-        `-# ✅ Blacklist MS-13 • ${FOOTER_TEXT}`
-      ),
-      components: [],
-    })
-  }
-
-  if (id === 'rec_bl_cancelar') {
-    return interaction.update({ content: '❌ Ação cancelada.', components: [] })
-  }
-
-  // compat IDs legados
-  if (id === 'sel_cand_v14' || id === 'sel_rec_v14' || id === 'rec_select_candidatos') {
-    if (interaction.replied || interaction.deferred) return
-    await interaction.deferReply({ ephemeral: true })
-    const r = getDb().prepare('DELETE FROM perguntas WHERE id=?').run(parseInt(interaction.values[0]))
-    if (r.changes > 0) {
-      await interaction.editReply({ content: '✅ Pergunta removida!', components: [] })
-      await _atualizarPainelFormulario(interaction.guild, interaction.client.user.id)
+    if (existing) {
+      console.log(`[RANK] Editando mensagem existente: ${existing.id}`)
+      await existing.edit(payload)
+      console.log(`[RANK] Ranking "${tipo}" atualizado (edit) OK`)
     } else {
-      await interaction.editReply({ content: '❌ Não encontrada.', components: [] })
+      console.log(`[RANK] Sem mensagem previa — enviando nova`)
+      await channel.send(payload)
+      console.log(`[RANK] Ranking "${tipo}" enviado (send) OK`)
     }
-    return
+  } catch (err) {
+    console.error(`[RANK] Erro ao atualizar ranking "${tipo}":`, err)
+  } finally {
+    _em_andamento[tipo] = false
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-const customIds = [
-  'rec_fechar','rec_assumir','rec_renomear','rec_enviar_form','rec_cancel_timer',
-  'rec_aprovar_m','rec_reprovar_m','rec_blacklist','rec_gerar_tkt',
-  'rec_add_q','rec_edit_q','rec_rem_q','rec_timer_q','rec_view_q','rec_refresh_q','rec_export_q','rec_import_q',
-  'rec_select_rem_q','rec_gerar_rel_v14','rec_blacklist_v14',
-  'sel_cand_v14','sel_rec_v14','rec_select_candidatos',
-  'modal_rec_fechar','modal_rec_renomear','modal_rec_aprovar','modal_rec_blacklist',
-  'modal_rec_add_q','modal_rec_edit_q','modal_rec_relatorio','modal_rec_import_q',
-]
 
 module.exports = {
-  customIds,
-  execute,
-  buildPainelFormulario,
-  buildPainelFormularioContainer,
-  buildPainelRelatorio,
-  buildPainelBlacklist,
-  buildPainelRecrutamento,
-  buildTopRecrutadores,
-  buildTopRecrutadoresVazio,
-  buildTicketAberturaContainer,
-  buildRecContent,
-  atualizarRankingRecrutadores: (guild) => atualizarRanking('recrutadores', guild),
+  getDb,
+  agora,
+  atualizarRanking,
+  buildPayloadRankingRecrutadores,
+  buildPayloadRankingAtendentes,
+  buildPayloadRankingRecrutadoresVazio,
+  buildPayloadRankingAtendentesVazio,
 }
