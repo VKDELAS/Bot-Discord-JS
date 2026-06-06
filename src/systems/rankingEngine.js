@@ -137,7 +137,9 @@ function buildPayloadRankingRecrutadores(guild) {
           `> ✨ **LÍDER DA COMPETIÇÃO**\n` +
           `> 📊 **${d.total} ${plural}**\n\n`
       } else {
-        podio += `${medalhas[i]} **${nome}** — \`${d.total} ${plural}\`\n`
+        podio +=
+          `${medalhas[i]} **${nome}**\n` +
+          `> 📊 ${d.total} ${plural}\n\n`
       }
     }
 
@@ -226,7 +228,9 @@ function buildPayloadRankingAtendentes(guild) {
           `> ✨ **MAIS ATIVO DA EQUIPE**\n` +
           `> 📊 **${d.total} ${plural} fechados**\n\n`
       } else {
-        podio += `${medalhas[i]} **${nome}** — \`${d.total} ${plural}\`\n`
+        podio +=
+          `${medalhas[i]} **${nome}**\n` +
+          `> 📊 ${d.total} ${plural} fechados\n\n`
       }
     }
 
