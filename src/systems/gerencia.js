@@ -4,14 +4,15 @@
 const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   UserSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
-  EmbedBuilder, ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
+  ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
   MessageFlags,
 } = require('discord.js')
 
 const {
-  COLOR_MS13, COLOR_ERROR, COLOR_WARNING,
+  COLOR_MS13, COLOR_ERROR, COLOR_WARNING, COLOR_SUCCESS,
   FOOTER_TEXT, ROLES, ROLE_IDS, ADV_CARGO_IDS,
   CHANNEL_IDS, REC_CHANNEL_IDS, MS13_ROLE_ID, CIDADAO_LOW_ID,
+  LOG_PD_CHANNEL_ID,
 } = require('../config/settings.js')
 
 // ─── customIds registrados neste sistema ──────────────────────────────────────
@@ -21,8 +22,7 @@ const customIds = [
   'cont_select_v13',
   'bl_sim_v14', 'bl_nao_v14',
   'modal_advertencia', 'modal_exoneracao',
-  // prefixo dinâmico — roteado via startsWith em interactionCreate (prefixo ger_)
-  // 'ger_exo_cont_'  ← tratado no bloco abaixo
+  'ger_exo_cont_',  // prefixo dinâmico — targetId embutido no customId
 ]
 
 // ─── Contexto de fluxo multi-step ─────────────────────────────────────────────
@@ -129,8 +129,105 @@ function getAdvAtual(member) {
   return 0
 }
 
-async function sendDM(user, embed) {
-  try { await user.send({ embeds: [embed] }) } catch {}
+async function sendDM(user, container) {
+  try { await user.send({ components: [container], flags: MessageFlags.IsComponentsV2 }) } catch {}
+}
+
+// ─── Helpers de log Components V2 minimalistas ──────────────────────────────────────────────
+function logAdv(proxAdv, targetId, targetTag, executorId, motivo, prova) {
+  const cor    = proxAdv >= 3 ? COLOR_ERROR : COLOR_WARNING
+  const titulo = proxAdv >= 3
+    ? '🚨 Expulsão Automática — 3ª Advertência'
+    : `⚠️ Advertência ${proxAdv} Aplicada`
+
+  return new ContainerBuilder()
+    .setAccentColor(cor)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## ${titulo}\n\n` +
+        `> 👤 **Membro:** <@${targetId}> \`${targetTag}\`\n` +
+        `> ⚙️ **Executor:** <@${executorId}>\n` +
+        `> 🔢 **ADV:** ADV ${proxAdv}\n` +
+        `> 📝 **Motivo:** ${motivo}\n` +
+        `> 🔗 **Prova:** ${prova}`
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# ⚠️ Gerência MS-13 • ${FOOTER_TEXT}`)
+    )
+}
+
+function logExo(targetId, targetTag, executorId, motivo, prova) {
+  return new ContainerBuilder()
+    .setAccentColor(COLOR_ERROR)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 🚪 Membro Exonerado\n\n` +
+        `> 👤 **Membro:** <@${targetId}> \`${targetTag}\`\n` +
+        `> ⚙️ **Executor:** <@${executorId}>\n` +
+        `> 📝 **Motivo:** ${motivo}\n` +
+        `> 🔗 **Prova:** ${prova}`
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# 🚪 Exoneração MS-13 • ${FOOTER_TEXT}`)
+    )
+}
+
+function logBlacklist(targetId, targetTag, executorId, motivo, prova) {
+  return new ContainerBuilder()
+    .setAccentColor(0x2C2F33)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## ⛔ Adicionado à Blacklist\n\n` +
+        `> 👤 **Membro:** <@${targetId}> \`${targetTag}\`\n` +
+        `> ⚙️ **Executor:** <@${executorId}>\n` +
+        `> 📝 **Motivo:** ${motivo}\n` +
+        `> 🔗 **Prova:** ${prova}`
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# ⛔ Blacklist MS-13 • ${FOOTER_TEXT}`)
+    )
+}
+
+function dmAdv(proxAdv, motivo) {
+  const titulo = proxAdv >= 3
+    ? '🚨 Você foi expulso(a) da MS-13'
+    : `⚠️ Você recebeu ADV ${proxAdv} — MS-13`
+  const desc = proxAdv >= 3
+    ? `Você acumulou **3 advertências** e foi **expulso(a) automaticamente** da facção.\n\n**Motivo:** ${motivo}`
+    : `Você recebeu a **${proxAdv}ª advertência** na MS-13.\n\n**Motivo:** ${motivo}` +
+      (proxAdv === 2 ? '\n\n> ‼️ Na próxima advertência você será **expulso(a) automaticamente**.' : '')
+
+  return new ContainerBuilder()
+    .setAccentColor(proxAdv >= 3 ? COLOR_ERROR : COLOR_WARNING)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`## ${titulo}\n\n${desc}`)
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# MS-13 Roleplay • Notificação Oficial`)
+    )
+}
+
+function dmExo(motivo) {
+  return new ContainerBuilder()
+    .setAccentColor(COLOR_ERROR)
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(
+        `## 🚪 Você foi exonerado(a) da MS-13\n\n` +
+        `Você foi **exonerado(a)** da facção.\n\n` +
+        `**Motivo:** ${motivo}`
+      )
+    )
+    .addSeparatorComponents(new SeparatorBuilder())
+    .addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`-# MS-13 Roleplay • Notificação Oficial`)
+    )
 }
 
 // ─── Handler central ──────────────────────────────────────────────────────────
@@ -343,39 +440,25 @@ async function execute(interaction) {
       for (const id of todosCargos) await target.roles.remove(id).catch(() => {})
       await target.setNickname(null).catch(() => {})
 
-      const logEmbed = new EmbedBuilder()
-        .setColor(COLOR_ERROR)
-        .setTitle('🚨 Expulsão Automática — 3ª Advertência')
-        .addFields(
-          { name: '👤 Membro',   value: `<@${ctx.targetId}> (${ctx.targetTag})`, inline: true },
-          { name: '⚙️ Executor', value: `<@${interaction.user.id}>`,             inline: true },
-          { name: '📝 Motivo',   value: motivo },
-          { name: '🔗 Prova',    value: prova },
-        )
-        .setFooter({ text: FOOTER_TEXT })
-        .setTimestamp()
-
       const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_adv_gerencia)
       const pubCh = guild.channels.cache.get(CHANNEL_IDS.pub_adv)
-      if (logCh) await logCh.send({ embeds: [logEmbed] })
+      if (logCh) await logCh.send({ components: [logAdv(3, ctx.targetId, ctx.targetTag, interaction.user.id, motivo, prova)], flags: MessageFlags.IsComponentsV2 })
       if (pubCh) await pubCh.send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(COLOR_ERROR)
-            .setTitle('📢 Expulsão Automática — MS-13')
-            .setDescription(`**${ctx.targetTag}** foi expulso(a) automaticamente após acumular **3 advertências**.\n**Motivo:** ${motivo}`)
-            .setFooter({ text: FOOTER_TEXT })
-            .setTimestamp(),
+        components: [
+          new ContainerBuilder()
+            .setAccentColor(COLOR_ERROR)
+            .addTextDisplayComponents(
+              new TextDisplayBuilder().setContent(
+                `## 📢 Expulsão Automática — MS-13\n\n` +
+                `> **${ctx.targetTag}** foi expulso(a) automaticamente após acumular **3 advertências**.\n` +
+                `> 📝 **Motivo:** ${motivo}`
+              )
+            )
         ],
+        flags: MessageFlags.IsComponentsV2,
       })
 
-      await sendDM(target.user, new EmbedBuilder()
-        .setColor(COLOR_ERROR)
-        .setTitle('🚨 Você foi expulso(a) da MS-13')
-        .setDescription(`Você acumulou **3 advertências** e foi **expulso(a) automaticamente** da facção.\n\n**Motivo:** ${motivo}`)
-        .setFooter({ text: FOOTER_TEXT })
-        .setTimestamp()
-      )
+      await sendDM(target.user, dmAdv(3, motivo))
 
       selectContextMap.delete(interaction.user.id)
       return interaction.editReply({
@@ -389,45 +472,24 @@ async function execute(interaction) {
     const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_adv_gerencia)
     const pubCh = guild.channels.cache.get(CHANNEL_IDS.pub_adv)
 
-    if (logCh) await logCh.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(COLOR_WARNING)
-          .setTitle(`⚠️ Advertência ${proxAdv} Aplicada`)
-          .addFields(
-            { name: '👤 Membro',   value: `<@${ctx.targetId}> (${ctx.targetTag})`, inline: true },
-            { name: '⚙️ Executor', value: `<@${interaction.user.id}>`,             inline: true },
-            { name: '🔢 ADV',      value: `ADV ${proxAdv}`,                        inline: true },
-            { name: '📝 Motivo',   value: motivo },
-            { name: '🔗 Prova',    value: prova },
-          )
-          .setFooter({ text: FOOTER_TEXT })
-          .setTimestamp(),
-      ],
-    })
+    if (logCh) await logCh.send({ components: [logAdv(proxAdv, ctx.targetId, ctx.targetTag, interaction.user.id, motivo, prova)], flags: MessageFlags.IsComponentsV2 })
 
     if (pubCh) await pubCh.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(COLOR_WARNING)
-          .setTitle(`📢 Advertência ${proxAdv} — MS-13`)
-          .setDescription(`**${ctx.targetTag}** recebeu a **ADV ${proxAdv}**.\n**Motivo:** ${motivo}`)
-          .setFooter({ text: FOOTER_TEXT })
-          .setTimestamp(),
+      components: [
+        new ContainerBuilder()
+          .setAccentColor(COLOR_WARNING)
+          .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+              `## 📢 Advertência ${proxAdv} — MS-13\n\n` +
+              `> **${ctx.targetTag}** recebeu a **ADV ${proxAdv}**.\n` +
+              `> 📝 **Motivo:** ${motivo}`
+            )
+          )
       ],
+      flags: MessageFlags.IsComponentsV2,
     })
 
-    await sendDM(target.user, new EmbedBuilder()
-      .setColor(COLOR_WARNING)
-      .setTitle(`⚠️ Você recebeu ADV ${proxAdv} — MS-13`)
-      .setDescription(
-        `Você recebeu a **${proxAdv}ª advertência** na MS-13.\n\n` +
-        `**Motivo:** ${motivo}\n\n` +
-        (proxAdv === 2 ? '> ‼️ Na próxima advertência você será **expulso(a) automaticamente**.' : '')
-      )
-      .setFooter({ text: FOOTER_TEXT })
-      .setTimestamp()
-    )
+    await sendDM(target.user, dmAdv(proxAdv, motivo))
 
     selectContextMap.delete(interaction.user.id)
     return interaction.editReply({
@@ -466,32 +528,13 @@ async function execute(interaction) {
       ...ctx, motivo, prova, exoExecutorId: interaction.user.id,
     })
 
-    // Log interno
-    const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_adv_gerencia)
-    if (logCh) await logCh.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(COLOR_ERROR)
-          .setTitle('🚪 Membro Exonerado')
-          .addFields(
-            { name: '👤 Membro',   value: `<@${ctx.targetId}> (${ctx.targetTag})`, inline: true },
-            { name: '⚙️ Executor', value: `<@${interaction.user.id}>`,             inline: true },
-            { name: '📝 Motivo',   value: motivo },
-            { name: '🔗 Prova',    value: prova },
-          )
-          .setFooter({ text: FOOTER_TEXT })
-          .setTimestamp(),
-      ],
-    })
+    // Log no canal de PD (logs oficiais da facção)
+    const logPdCh = guild.channels.cache.get(LOG_PD_CHANNEL_ID)
+    const exoContainer = logExo(ctx.targetId, ctx.targetTag, interaction.user.id, motivo, prova)
+    if (logPdCh) await logPdCh.send({ components: [exoContainer], flags: MessageFlags.IsComponentsV2 })
 
     // DM para o membro
-    await sendDM(target.user, new EmbedBuilder()
-      .setColor(COLOR_ERROR)
-      .setTitle('🚪 Você foi exonerado(a) da MS-13')
-      .setDescription(`Você foi **exonerado(a)** da facção.\n\n**Motivo:** ${motivo}`)
-      .setFooter({ text: FOOTER_TEXT })
-      .setTimestamp()
-    )
+    await sendDM(target.user, dmExo(motivo))
 
     // Prompt de blacklist
     return interaction.editReply({
@@ -521,30 +564,20 @@ async function execute(interaction) {
     const ctx = selectContextMap.get(interaction.user.id)
     if (!ctx) return interaction.editReply({ content: '❌ Contexto perdido.', components: [] })
 
-    // Integração com o sistema de blacklist SQLite
+    // Integração com o sistema de blacklist SQLite — mesmo banco do recrutamento
     try {
-      const { recAddBlacklist } = require('../database/manager.js')
-      recAddBlacklist(ctx.targetId, ctx.motivo, interaction.user.tag)
+      const { getDb } = require('./rankingEngine.js')
+      getDb().prepare('INSERT OR REPLACE INTO blacklist (user_id, motivo, adicionado_por) VALUES (?, ?, ?)')
+        .run(ctx.targetId, ctx.motivo, interaction.user.id)
     } catch (err) {
-      console.error('[gerencia] recAddBlacklist error:', err)
+      console.error('[gerencia] blacklist insert error:', err)
     }
 
-    // Log no canal de blacklist
-    const blCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.blacklist)
-    if (blCh) await blCh.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(COLOR_ERROR)
-          .setTitle('⛔ Adicionado à Blacklist')
-          .addFields(
-            { name: '👤 Membro',   value: `<@${ctx.targetId}> (${ctx.targetTag})`, inline: true },
-            { name: '⚙️ Executor', value: `<@${ctx.exoExecutorId}>`,               inline: true },
-            { name: '📝 Motivo',   value: ctx.motivo },
-            { name: '🔗 Prova',    value: ctx.prova },
-          )
-          .setFooter({ text: FOOTER_TEXT })
-          .setTimestamp(),
-      ],
+    // Log permanente no canal de logs de blacklist
+    const blLogCh = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.logs_blacklist)
+    if (blLogCh) await blLogCh.send({
+      components: [logBlacklist(ctx.targetId, ctx.targetTag, ctx.exoExecutorId, ctx.motivo, ctx.prova)],
+      flags: MessageFlags.IsComponentsV2,
     })
 
     selectContextMap.delete(interaction.user.id)

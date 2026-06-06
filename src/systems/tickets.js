@@ -24,17 +24,15 @@ const PERM_TICKET_ROLE_ID = _PERM_TICKET_ROLE_ID
 
 const customIds = [
   'tkt_select_v14', 'close_v14',
+  // IDs exclusivos do tickets.js (aceitar/fechar por tipo)
   'rec_aceitar_v14', 'rec_fechar_v14',
   'sup_aceitar_v14', 'sup_fechar_v14',
   'eli_aceitar_v14', 'eli_fechar_v14',
   'par_aceitar_v14', 'par_fechar_v14',
   'sup_modal_v14', 'eli_modal_v14', 'par_modal_v14',
-  // Botões do sistema de recrutamento — delegados para recrutamento.js
-  'rec_enviar_form', 'rec_aprovar_m', 'rec_reprovar_m', 'rec_blacklist',
-  'rec_assumir', 'rec_renomear', 'rec_cancel_timer', 'rec_fechar',
-  'modal_rec_fechar', 'modal_rec_renomear', 'modal_rec_aprovar', 'modal_rec_blacklist',
-  // Blacklist
-  'rec_blacklist_v14', 'rec_bl_adicionar', 'rec_bl_user_select', 'rec_bl_confirmar', 'rec_bl_cancelar',
+  // NOTA: rec_enviar_form, rec_aprovar_m, rec_reprovar_m, rec_blacklist,
+  // rec_assumir, rec_renomear, rec_cancel_timer, rec_fechar e modais
+  // são tratados diretamente pelo recrutamento.js — NÃO duplicar aqui.
 ]
 
 // ticketContextMap: canal.id → { tipo, openerTag, openerId, userMention, extraData }
@@ -558,18 +556,8 @@ async function execute(interaction) {
     return
   }
 
-  // ── BOTÕES DO SISTEMA DE RECRUTAMENTO — delega para recrutamento.js ─────────
-  const recIds = [
-    'rec_enviar_form', 'rec_aprovar_m', 'rec_reprovar_m', 'rec_blacklist',
-    'rec_assumir', 'rec_renomear', 'rec_cancel_timer', 'rec_fechar',
-    'modal_rec_fechar', 'modal_rec_renomear', 'modal_rec_aprovar', 'modal_rec_blacklist',
-    'rec_blacklist_v14', 'rec_bl_adicionar', 'rec_bl_user_select', 'rec_bl_confirmar', 'rec_bl_cancelar',
-    'rec_confirmar_aprovacao', 'rec_cancelar_aprovacao',
-  ]
-  if (recIds.includes(id)) {
-    const recrutamento = require('./recrutamento.js')
-    return recrutamento.execute(interaction)
-  }
+  // IDs de recrutamento (rec_enviar_form, rec_aprovar_m, etc.) são tratados
+  // diretamente pelo recrutamento.js via systemHandlers — não delegamos aqui.
 
   // ── ACEITAR ───────────────────────────────────────────────────────────────────
   if (['rec_aceitar_v14', 'sup_aceitar_v14', 'eli_aceitar_v14', 'par_aceitar_v14'].includes(id)) {

@@ -119,6 +119,7 @@ const REC_CHANNEL_IDS = {
   top_tickets:         '1488347411784007690',
   blacklist:           '1488347509599502356',
   logs_relatorios_rec: '1492865227908317324',
+  logs_blacklist:      '1512857750915256492',
   categoria_rec:       '0',
 }
 const _PERM_TICKET_ROLE_ID = '1478161626187432077'

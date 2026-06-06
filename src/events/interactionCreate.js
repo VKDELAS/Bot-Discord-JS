@@ -30,26 +30,13 @@ module.exports = {
         return
       }
 
-      // Match por prefixo (IDs dinâmicos: ap_userId, re_userId, rec_*, ticket_*, etc.)
-      const prefixos = [
-        'ap_', 're_',           // metas: aprovar/recusar
-        'rec_', 'modal_',       // recrutamento
-        'ticket_', 'reg_',      // outros
-        'meta_', 'ger_',
-        'sel_', 'sup_', 'eli_', 'par_',  // tickets
-      ]
-
-      for (const prefixo of prefixos) {
-        if (customId.startsWith(prefixo)) {
-          // Tenta match exato primeiro (já tentado acima), agora tenta handler do prefixo
-          const handler = systemHandlers.get(prefixo)
-          if (handler) {
-            await handler(interaction, client)
-            return
-          }
-          // Se não tem handler de prefixo, percorre todos os handlers para encontrar um que cubra
-          // (os systems com customIds[] já registraram os IDs exatos, não prefixos)
-          break
+      // Match por prefixo (IDs dinâmicos: ap_userId, re_userId, ger_exo_cont_id, etc.)
+      // Percorre todos os handlers registrados e testa se o customId começa com aquela chave.
+      // Isso cobre qualquer prefixo dinâmico sem precisar manter lista manual de prefixos.
+      for (const [key, handler] of systemHandlers.entries()) {
+        if (customId.startsWith(key) && key !== customId) {
+          await handler(interaction, client)
+          return
         }
       }
 

@@ -571,3 +571,5 @@ Antes de dar push, verificar:
 - [ ] Nenhum `await` em queries `better-sqlite3`
 - [ ] Imports circulares estão dentro das funções, não no topo
 - [ ] `selectContextMap.delete()` chamado após uso para evitar memory leak
+
+Se voce precisar de arquivos nao pergunto se posso te mandar so pede que eu mando ok?!

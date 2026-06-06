@@ -13,18 +13,18 @@ const {
   MediaGalleryItemBuilder,
   MessageFlags,
 } = require('discord.js')
-const Database = require('better-sqlite3')
 const moment   = require('moment-timezone')
 
 const {
   BR_TZ, COLOR_REC, COLOR_MS13, COLOR_SUCCESS, COLOR_ERROR,
-  FOOTER_TEXT, REC_DB, REC_CHANNEL_IDS, _PERM_TICKET_ROLE_ID,
+  FOOTER_TEXT, REC_CHANNEL_IDS, _PERM_TICKET_ROLE_ID,
 } = require('../config/settings.js')
 
 const {
   atualizarRanking,
   buildPayloadRankingRecrutadoresVazio,
   buildPayloadRankingAtendentesVazio,
+  getDb,
   agora,
 } = require('../systems/rankingEngine.js')
 
@@ -187,14 +187,14 @@ const resetarRecRank = {
       if (interaction.options.getString('confirmar') !== 'CONFIRMAR')
         return interaction.editReply({ content: '❌ Digite exatamente **CONFIRMAR** para prosseguir.' })
 
-      const _db  = new Database(REC_DB)
-      const info = _db.prepare("UPDATE recrutamentos SET status='fechado' WHERE status != 'fechado'").run()
+      // ✅ Usa a conexão compartilhada — a mesma que atualizarRanking usa
+      const info = getDb().prepare("UPDATE recrutamentos SET status='fechado' WHERE status != 'fechado'").run()
 
       // Atualiza o visual do canal com payload vazio
       const ch = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.recrutadores)
       if (ch) {
-        const payload = buildPayloadRankingRecrutadoresVazio()
-        const msgs = await ch.messages.fetch({ limit: 50 })
+        const payload  = buildPayloadRankingRecrutadoresVazio()
+        const msgs     = await ch.messages.fetch({ limit: 50 })
         const existing = msgs.find(m => m.author.id === interaction.client.user.id && JSON.stringify(m.components).includes('RANK_REC'))
         if (existing) await existing.edit(payload).catch(() => null)
         else await ch.send(payload).catch(() => null)
@@ -237,8 +237,8 @@ const resetarAtdRank = {
       if (interaction.options.getString('confirmar') !== 'CONFIRMAR')
         return interaction.editReply({ content: '❌ Digite exatamente **CONFIRMAR** para prosseguir.' })
 
-      const _db  = new Database(REC_DB)
-      const info = _db.prepare("UPDATE atendimentos SET status='fechado' WHERE status != 'fechado'").run()
+      // ✅ Usa a conexão compartilhada — a mesma que atualizarRanking usa
+      const info = getDb().prepare("UPDATE atendimentos SET status='fechado' WHERE status != 'fechado'").run()
 
       const ch = interaction.guild.channels.cache.get(REC_CHANNEL_IDS.top_tickets)
       if (ch) {
@@ -315,7 +315,7 @@ const criarCanalTicket = {
       const member         = await guild.members.fetch(candidato.id).catch(() => null)
       if (!member) return interaction.editReply({ content: `❌ **${candidato.tag}** não está no servidor.` })
 
-      const db = new Database(REC_DB)
+      const db = getDb()
 
       // ✅ Anti-duplicação
       const existente = db.prepare("SELECT ticket_id FROM recrutamentos WHERE candidato_id=? AND status='aberto' LIMIT 1").get(candidato.id)
