@@ -80,7 +80,7 @@ async function _timerInatividade(canal, segundos) {
 function buildRecContent(userMention, responsavel = 'Aguardando...') {
   return (
     `# 🎖️ MS-13 — Recrutamento\n` +
-    `Bem-vindo ao processo seletivo, ${userMention}. Leia com atenção antes de prosseguir.\n\n` +
+    `Bem-vindo ao processo seletivo, ${userMention}! <@&${PERM_TICKET_ROLE_ID}>. Leia com atenção antes de prosseguir.\n\n` +
     `> **Categoria:** Recrutamento\n` +
     `> **Responsável:** ${responsavel}\n\n` +
     `## 📌 Etapas\n\n` +

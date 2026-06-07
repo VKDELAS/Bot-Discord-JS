@@ -180,15 +180,57 @@ function recSetConfig(chave, valor) {
 function loadRecConfig()       { return _readJson(REC_CONFIG_PATH, {}) }
 function saveRecConfig(data)   { _writeJson(REC_CONFIG_PATH, data) }
 
+// ─── SQLite: tabela advertencias ──────────────────────────────────────────────
+// Exportamos getDb para que advManager.js possa importar sem duplicar a conexão.
+function advInitDb() {
+  getDb().exec(`
+    CREATE TABLE IF NOT EXISTS advertencias (
+      user_id             TEXT    NOT NULL,
+      adv_numero          INTEGER NOT NULL,
+      motivo              TEXT    NOT NULL,
+      aplicada_por        TEXT    NOT NULL,
+      timestamp_aplicacao TEXT    NOT NULL,
+      prazo_iso           TEXT,
+      log_msg_id          TEXT,
+      PRIMARY KEY (user_id)
+    );
+  `)
+  // Migração silenciosa — adiciona coluna se ainda não existir (banco legado)
+  try { getDb().exec(`ALTER TABLE advertencias ADD COLUMN log_msg_id TEXT`) } catch {}
+}
+
+function advSalvar(userId, advNumero, motivo, aplicadaPor, prazoIso = null, logMsgId = null) {
+  getDb().prepare(`
+    INSERT OR REPLACE INTO advertencias
+      (user_id, adv_numero, motivo, aplicada_por, timestamp_aplicacao, prazo_iso, log_msg_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(userId, advNumero, motivo, aplicadaPor, new Date().toISOString(), prazoIso, logMsgId)
+}
+
+function advGetAtiva(userId) {
+  return getDb().prepare('SELECT * FROM advertencias WHERE user_id = ?').get(userId)
+}
+
+function advGetTodas() {
+  return getDb().prepare('SELECT * FROM advertencias').all()
+}
+
+function advRemover(userId) {
+  getDb().prepare('DELETE FROM advertencias WHERE user_id = ?').run(userId)
+}
+
 module.exports = {
   loadData, saveData,
   loadRegistros, saveRegistro,
   loadMultasProcessadas, salvarMultaProcessada,
   loadRecConfig, saveRecConfig,
+  getDb,
   recInitDb,
   recGetTicket, recCreateTicket, recUpdateTicketStatus,
   recSalvarResposta, recGetRespostas, recGetPerguntas,
   recGetBlacklist, recAddBlacklist, recRemoveBlacklist,
   recGetRecrutador, recUpsertRecrutador, recGetTopRecrutadores,
   recSalvarAvaliacao, recGetConfig, recSetConfig,
+  // Advertências
+  advInitDb, advSalvar, advGetAtiva, advGetTodas, advRemover,
 }

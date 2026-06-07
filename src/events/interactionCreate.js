@@ -24,6 +24,13 @@ module.exports = {
       const customId = interaction.customId
       if (!customId) return
 
+      // ── Botão "✅ ADV Paga" — roteado diretamente (prefixo adv_paga_) ────
+      if (customId.startsWith('adv_paga_')) {
+        const { handleAdvPaga } = require('../systems/advManager')
+        await handleAdvPaga(interaction, client)
+        return
+      }
+
       // Match exato primeiro
       if (systemHandlers.has(customId)) {
         await systemHandlers.get(customId)(interaction, client)

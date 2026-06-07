@@ -1,31 +1,40 @@
 // src/config/settings.js
-// Todas as constantes críticas do MS-13 Bot
-// NUNCA alterar custom_ids — mensagens antigas no Discord têm esses IDs gravados
-
 'use strict'
 
-const BR_TZ     = 'America/Sao_Paulo'
+const BR_TZ      = 'America/Sao_Paulo'
 const META_VALOR = 70_000
 
+// ─────────────────────────────────────────────
+// ROLES — categorias para o sistema de metas
+// isento  → 100% isento
+// gerencia → 75% do valor / isento no modo produto
+// frente   → 50% do valor / 2 rotas no modo produto
+// membro   → 100% do valor / 2 rotas no modo produto
+// ─────────────────────────────────────────────
 const ROLES = {
   isento: [
-    '1469085061373628437',
-    '1471295287896178892',
-    '1469085227757605002',
-    '1469085338046697572',
-    '1469085446108741780',
-    '1469131886533017671',
+    '1469085061373628437', // Diretoria
+    '1471295287896178892', // Gerente Geral
+    '1469085227757605002', // Resp. Recrutamentos
+    '1469085338046697572', // Resp. Farm
+    '1469085446108741780', // Resp. Elite
+    '1508674475913248908', // 01
+    '1508674135507599390', // 02
+    '1508674735356121160', // 03
   ],
-  elite: [
-    '1471297185227346183',
-    '1471297000845742292',
-    '1477356816366047445',
+  gerencia: [
+    '1469131886533017671', // Elite
+    '1471297185227346183', // Linha de Frente  ← 75%
+    '1471297000845742292', // Conselheiro       ← 75%
+  ],
+  frente: [
+    '1477356816366047445', // Corredor          ← 50%
   ],
   membro: [
-    '1471296434505646110',
-    '1471296807349911604',
-    '1471295722937647239',
-    '1469085564920795371',
+    '1471296434505646110', // Soldado
+    '1471296807349911604', // Associado
+    '1471295722937647239', // Morador
+    '1469085564920795371', // MS-13
   ],
 }
 
@@ -52,6 +61,7 @@ const CANAIS_METAS_IDS = {
   entregar:  '1487240068757323848',
   entregues: '1487240069705367642',
   relatorio: '1487240071760449596',
+  geral:     '1469092035796664361', // fallback lembrete
 }
 
 const CHANNEL_IDS = {
@@ -74,6 +84,7 @@ const CHANNEL_IDS = {
   pub_ausentes:      '1469093874029826261',
   pub_atm:           '1487612607732125877',
   pub_kill:          '1487612854306603098',
+  geral:             '1469092035796664361',
 }
 
 const ROLE_IDS = {
@@ -93,14 +104,14 @@ const ADV_CARGO_IDS = {
   3: '1503911868316647588',
 }
 
-const CIDADAO_LOW_ID            = '1469087056235073669'
-const LOG_PD_CHANNEL_ID         = '1504183029965520996'
-const CANAL_REGISTROS_ACOES_ID  = '1504162046206410793'
-const REGISTROS_ACOES_FILE      = 'registros.json'
+const CIDADAO_LOW_ID           = '1469087056235073669'
+const LOG_PD_CHANNEL_ID        = '1504183029965520996'
+const CANAL_REGISTROS_ACOES_ID = '1504162046206410793'
+const REGISTROS_ACOES_FILE     = 'registros.json'
 
-const PRODUTOS_META_LISTA  = 'Pólvora (~220 un.), Ferro (~190 un.), Kevlar (~70 un.) e Tecido (~60 un.)\n*(meta padrão: 2 rotas completas)*'
-const PRODUTOS_META_CURTO  = 'Pólvora | Ferro | Kevlar | Tecido'
-const META_ROTAS_PRODUTO   = { isento: 0, gerencia: 0, elite: 2, membro: 2 }
+const PRODUTOS_META_LISTA = 'Pólvora (~220 un.), Ferro (~190 un.), Kevlar (~70 un.) e Tecido (~60 un.)\n*(meta padrão: 2 rotas completas)*'
+const PRODUTOS_META_CURTO = 'Pólvora | Ferro | Kevlar | Tecido'
+const META_ROTAS_PRODUTO  = { isento: 0, gerencia: 0, frente: 2, membro: 2 }
 
 const COLOR_MS13    = 0x0000FF
 const COLOR_SUCCESS = 0x2ECC71

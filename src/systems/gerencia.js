@@ -19,10 +19,11 @@ const {
 const customIds = [
   'mgr_adv', 'mgr_exo',
   'select_advertencias_v13', 'select_exoneracao_v13',
-  'cont_select_v13',
   'bl_sim_v14', 'bl_nao_v14',
   'modal_advertencia', 'modal_exoneracao',
-  'ger_exo_cont_',  // prefixo dinâmico — targetId embutido no customId
+  'ger_adv_cont_',      // prefixo dinâmico ADV — targetId embutido no customId
+  'modal_advertencia_', // prefixo dinâmico — targetId embutido (imune a restart)
+  'ger_exo_cont_',      // prefixo dinâmico EXO — targetId embutido no customId
 ]
 
 // ─── Contexto de fluxo multi-step ─────────────────────────────────────────────
@@ -49,7 +50,8 @@ function buildEmbedGerencia() {
       '## ⚠️ Aplicar Advertência\n' +
       '> Aplica advertência formal e acumulativa ao membro.\n' +
       '> **ADV 1** e **ADV 2** aplicam cargo temporário de advertência.\n' +
-      '> **ADV 3** dispara **expulsão automática** da facção.\n' +
+      '> **ADV 3** aplica cargo de última advertência com **72h para quitar**.\n' +
+      '> Sem pagamento no prazo → **expulsão automática** da facção.\n' +
       '> O membro recebe notificação via **DM** após cada ação.'
     )
   )
@@ -134,11 +136,21 @@ async function sendDM(user, container) {
 }
 
 // ─── Helpers de log Components V2 minimalistas ──────────────────────────────────────────────
-function logAdv(proxAdv, targetId, targetTag, executorId, motivo, prova) {
+function logAdv(proxAdv, targetId, targetTag, executorId, motivo, prova, valorFmt = null, prazoIso = null, statusLine = null) {
   const cor    = proxAdv >= 3 ? COLOR_ERROR : COLOR_WARNING
   const titulo = proxAdv >= 3
     ? '🚨 Expulsão Automática — 3ª Advertência'
     : `⚠️ Advertência ${proxAdv} Aplicada`
+
+  const prazoLine = prazoIso
+    ? `\n> ⏰ **Prazo:** <t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:F> (<t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:R>)`
+    : ''
+  const valorLine = valorFmt
+    ? `\n> 💰 **Multa:** ${valorFmt}`
+    : ''
+  const statusBlock = statusLine
+    ? `\n\n${statusLine}`
+    : ''
 
   return new ContainerBuilder()
     .setAccentColor(cor)
@@ -148,8 +160,11 @@ function logAdv(proxAdv, targetId, targetTag, executorId, motivo, prova) {
         `> 👤 **Membro:** <@${targetId}> \`${targetTag}\`\n` +
         `> ⚙️ **Executor:** <@${executorId}>\n` +
         `> 🔢 **ADV:** ADV ${proxAdv}\n` +
-        `> 📝 **Motivo:** ${motivo}\n` +
-        `> 🔗 **Prova:** ${prova}`
+        `> 📝 **Motivo:** ${motivo}` +
+        valorLine +
+        prazoLine +
+        `\n> 🔗 **Prova:** ${prova}` +
+        statusBlock
       )
     )
     .addSeparatorComponents(new SeparatorBuilder())
@@ -289,7 +304,7 @@ async function execute(interaction) {
 
     const advAtual = getAdvAtual(target)
     const proxAdv  = advAtual + 1
-    const aviso    = proxAdv >= 3 ? '\n> ‼️ Esta será a **3ª advertência** — resultará em **expulsão automática**.' : ''
+    const aviso    = proxAdv >= 3 ? '\n> ‼️ Esta será a **3ª advertência** — o membro terá **72h para quitar** ou será **expulso automaticamente**.' : ''
 
     return interaction.update({
       content:
@@ -301,7 +316,7 @@ async function execute(interaction) {
         '\n\nClique em **Continuar** para preencher o motivo.',
       components: [
         new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('cont_select_v13').setLabel('Continuar').setStyle(ButtonStyle.Primary)
+          new ButtonBuilder().setCustomId(`ger_adv_cont_${targetId}`).setLabel('Continuar').setStyle(ButtonStyle.Primary)
         ),
       ],
     })
@@ -373,127 +388,116 @@ async function execute(interaction) {
     return interaction.showModal(modal)
   }
 
-  // ── Botão: Continuar → abre modal ─────────────────────────────────────────
-  if (customId === 'cont_select_v13') {
-    const ctx = selectContextMap.get(interaction.user.id)
-    if (!ctx)
-      return interaction.reply({ content: '❌ Contexto perdido. Reinicie o processo.', ephemeral: true })
+  // ── Botão: Continuar ADV (customId dinâmico — targetId embutido) ────────────
+  // Formato: ger_adv_cont_{targetId}
+  // Resolve o bug de "Contexto perdido" quando o Map some entre steps (restart do bot)
+  if (customId.startsWith('ger_adv_cont_')) {
+    const embeddedTargetId = customId.slice('ger_adv_cont_'.length)
 
-    if (ctx.type === 'adv') {
-      const modal = new ModalBuilder()
-        .setCustomId('modal_advertencia')
-        .setTitle('⚠️ Aplicar Advertência')
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('adv_motivo')
-            .setLabel('Motivo da advertência')
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true)
-            .setMaxLength(500)
-            .setPlaceholder('Descreva o motivo da advertência...')
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('adv_prova')
-            .setLabel('Link da prova (opcional)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(false)
-            .setMaxLength(300)
-            .setPlaceholder('https://imgur.com/...')
-        ),
-      )
-      return interaction.showModal(modal)
+    // Tenta recuperar do Map; se perdeu (restart), reconstrói a partir do Discord
+    let ctx = selectContextMap.get(interaction.user.id)
+    if (!ctx || ctx.type !== 'adv') {
+      const target = await guild.members.fetch(embeddedTargetId).catch(() => null)
+      if (!target)
+        return interaction.reply({ content: '❌ Membro não encontrado. Reinicie o processo.', ephemeral: true })
+      ctx = { type: 'adv', targetId: embeddedTargetId, targetTag: target.user.tag }
+      selectContextMap.set(interaction.user.id, ctx)
     }
 
+    const modal = new ModalBuilder()
+      .setCustomId(`modal_advertencia_${embeddedTargetId}`)
+      .setTitle('⚠️ Aplicar Advertência')
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('adv_motivo')
+          .setLabel('Motivo da advertência')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(500)
+          .setPlaceholder('Descreva o motivo da advertência...')
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('adv_valor')
+          .setLabel('Valor da multa (opcional)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(20)
+          .setPlaceholder('Ex: 250000 — vazio = sem multa')
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('adv_prazo')
+          .setLabel('Prazo para resolução (opcional)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(50)
+          .setPlaceholder('Ex: 3 dias, 72h, 1 semana — vazio = sem prazo')
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('adv_prova')
+          .setLabel('Link da prova (opcional)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setMaxLength(300)
+          .setPlaceholder('https://imgur.com/...')
+      ),
+    )
+    return interaction.showModal(modal)
   }
 
-  // ── Modal: Advertência ────────────────────────────────────────────────────
-  if (customId === 'modal_advertencia') {
+  // ── Modal: Advertência (customId dinâmico: modal_advertencia_{targetId}) ────
+  if (customId.startsWith('modal_advertencia_')) {
     await interaction.deferReply({ ephemeral: true })
 
-    const ctx = selectContextMap.get(interaction.user.id)
-    if (!ctx || ctx.type !== 'adv')
-      return interaction.editReply({ content: '❌ Contexto perdido. Reinicie o processo.' })
+    // TargetId embutido no customId — imune a restart do bot
+    const embeddedTargetId = customId.slice('modal_advertencia_'.length)
 
-    const motivo   = interaction.fields.getTextInputValue('adv_motivo')
-    const prova    = interaction.fields.getTextInputValue('adv_prova') || 'Não informado'
-    const target   = await guild.members.fetch(ctx.targetId).catch(() => null)
-    if (!target) return interaction.editReply({ content: '❌ Membro não encontrado no servidor.' })
-
-    const advAtual = getAdvAtual(target)
-    const proxAdv  = advAtual + 1
-
-    // Remove adv anterior se existir
-    if (advAtual >= 1 && ADV_CARGO_IDS[advAtual])
-      await target.roles.remove(ADV_CARGO_IDS[advAtual]).catch(() => {})
-
-    // ── 3ª ADV → expulsão automática ──────────────────────────────────────
-    if (proxAdv >= 3) {
-      if (ADV_CARGO_IDS[3]) await target.roles.add(ADV_CARGO_IDS[3]).catch(() => {})
-      if (target.roles.cache.has(MS13_ROLE_ID)) await target.roles.remove(MS13_ROLE_ID).catch(() => {})
-
-      const todosCargos = [
-        ...ROLES.isento, ...ROLES.elite, ...ROLES.membro,
-        ROLE_IDS.meta_paga, ROLE_IDS.etapa2,
-      ].filter(id => target.roles.cache.has(id))
-      for (const id of todosCargos) await target.roles.remove(id).catch(() => {})
-      await target.setNickname(null).catch(() => {})
-
-      const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_adv_gerencia)
-      const pubCh = guild.channels.cache.get(CHANNEL_IDS.pub_adv)
-      if (logCh) await logCh.send({ components: [logAdv(3, ctx.targetId, ctx.targetTag, interaction.user.id, motivo, prova)], flags: MessageFlags.IsComponentsV2 })
-      if (pubCh) await pubCh.send({
-        components: [
-          new ContainerBuilder()
-            .setAccentColor(COLOR_ERROR)
-            .addTextDisplayComponents(
-              new TextDisplayBuilder().setContent(
-                `## 📢 Expulsão Automática — MS-13\n\n` +
-                `> **${ctx.targetTag}** foi expulso(a) automaticamente após acumular **3 advertências**.\n` +
-                `> 📝 **Motivo:** ${motivo}`
-              )
-            )
-        ],
-        flags: MessageFlags.IsComponentsV2,
-      })
-
-      await sendDM(target.user, dmAdv(3, motivo))
-
-      selectContextMap.delete(interaction.user.id)
-      return interaction.editReply({
-        content: `✅ **${ctx.targetTag}** foi **expulso(a) automaticamente** (3ª advertência).`,
-      })
+    // Tenta recuperar ctx do Map; reconstrói se perdeu
+    let ctx = selectContextMap.get(interaction.user.id)
+    if (!ctx || ctx.type !== 'adv') {
+      const t = await guild.members.fetch(embeddedTargetId).catch(() => null)
+      if (!t) return interaction.editReply({ content: '❌ Membro não encontrado no servidor.' })
+      ctx = { type: 'adv', targetId: embeddedTargetId, targetTag: t.user.tag }
     }
 
-    // ── ADV 1 ou 2 → aplica cargo ─────────────────────────────────────────
-    await target.roles.add(ADV_CARGO_IDS[proxAdv]).catch(() => {})
+    const motivo   = interaction.fields.getTextInputValue('adv_motivo')
+    const valorRaw = interaction.fields.getTextInputValue('adv_valor') || ''
+    const prazoRaw = interaction.fields.getTextInputValue('adv_prazo') || ''
+    const prova    = interaction.fields.getTextInputValue('adv_prova') || 'Não informado'
 
-    const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_adv_gerencia)
-    const pubCh = guild.channels.cache.get(CHANNEL_IDS.pub_adv)
+    const target = await guild.members.fetch(ctx.targetId).catch(() => null)
+    if (!target) return interaction.editReply({ content: '❌ Membro não encontrado no servidor.' })
 
-    if (logCh) await logCh.send({ components: [logAdv(proxAdv, ctx.targetId, ctx.targetTag, interaction.user.id, motivo, prova)], flags: MessageFlags.IsComponentsV2 })
+    // Parse do prazo — null = sem prazo (adv permanente)
+    const { parsePrazoMs, aplicarAdvertencia } = require('./advManager.js')
+    const prazoMs = parsePrazoMs(prazoRaw)
 
-    if (pubCh) await pubCh.send({
-      components: [
-        new ContainerBuilder()
-          .setAccentColor(COLOR_WARNING)
-          .addTextDisplayComponents(
-            new TextDisplayBuilder().setContent(
-              `## 📢 Advertência ${proxAdv} — MS-13\n\n` +
-              `> **${ctx.targetTag}** recebeu a **ADV ${proxAdv}**.\n` +
-              `> 📝 **Motivo:** ${motivo}`
-            )
-          )
-      ],
-      flags: MessageFlags.IsComponentsV2,
-    })
+    // Parse do valor — null = sem multa
+    const valorNum = valorRaw.trim() ? parseInt(valorRaw.replace(/\D/g, ''), 10) : null
+    const valorFmt = valorNum ? `R$ ${valorNum.toLocaleString('pt-BR')}` : null
 
-    await sendDM(target.user, dmAdv(proxAdv, motivo))
+    const { proxAdv, exonerado } = await aplicarAdvertencia(
+      guild,
+      target,
+      motivo,
+      prova,
+      interaction.user.tag,
+      prazoMs,
+      valorFmt,   // passa valor formatado para o advManager incluir na DM e no log
+    )
 
     selectContextMap.delete(interaction.user.id)
+
+    const prazoInfo = prazoMs ? ` · prazo: **${prazoRaw.trim()}**` : ''
+    const valorInfo = valorFmt ? ` · multa: **${valorFmt}**` : ''
+
     return interaction.editReply({
-      content: `✅ **ADV ${proxAdv}** aplicada para **${ctx.targetTag}**.`,
+      content: proxAdv >= 3
+        ? `⚠️ **ADV 3** aplicada para **${ctx.targetTag}** — prazo de **72h** para quitar. Sem pagamento → expulsão automática.`
+        : `✅ **ADV ${proxAdv}** aplicada para **${ctx.targetTag}**${prazoInfo}${valorInfo}.`,
     })
   }
 
@@ -602,4 +606,4 @@ async function execute(interaction) {
   }
 }
 
-module.exports = { customIds, execute, buildEmbedGerencia, buildCentralGerenciaView }
+module.exports = { customIds, execute, buildEmbedGerencia, buildCentralGerenciaView, logAdv, dmAdv }

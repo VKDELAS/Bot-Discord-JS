@@ -466,6 +466,12 @@ async function _conduzirEntrevista(channel, candidatoId) {
   db.prepare('INSERT OR REPLACE INTO respostas_entrevista (canal_id, nome_ic, id_mta) VALUES (?, ?, ?)')
     .run(channel.id, nome_ic_auto ?? '', id_mta_auto ?? '')
 
+  // ✅ Salva respostas completas no banco (ticket_id = channel.id) para geração de relatório posterior
+  const { recSalvarResposta } = require('../database/manager.js')
+  for (const { pergunta, resposta } of respostas) {
+    recSalvarResposta(channel.id, pergunta, resposta)
+  }
+
   return respostas
 }
 
@@ -523,6 +529,15 @@ async function _aprovarMembro(interaction, nomeIC, idMTA) {
           `> **Aprovado por:** <@${interaction.user.id}>\n` +
           `> **Nick:** \`${novoNick}\`\n` +
           `> **Data:** ${agora()}`
+        )
+      )
+      .addSeparatorComponents(new SeparatorBuilder())
+      .addActionRowComponents(
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rec_ver_resp_${candidatoId}`)
+            .setLabel('📋 Ver Respostas')
+            .setStyle(ButtonStyle.Secondary)
         )
       )
     await logCh.send({ components: [logBox], flags: MessageFlags.IsComponentsV2 }).catch(() => null)
@@ -663,12 +678,6 @@ async function execute(interaction) {
     // ── Embed Components V2 com resumo do formulário ──────────────────────────
     const formBox = new ContainerBuilder()
       .setAccentColor(COLOR_REC)
-      .addMediaGalleryComponents(
-        new MediaGalleryBuilder().addItems(
-          new MediaGalleryItemBuilder().setURL(BANNER_REC)
-        )
-      )
-      .addSeparatorComponents(new SeparatorBuilder())
       .addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
           '# 📋 FORMULÁRIO CONCLUÍDO\n' +
@@ -1051,29 +1060,31 @@ async function execute(interaction) {
     if (interaction.replied || interaction.deferred) return
     await interaction.deferReply({ ephemeral: true })
 
-    // Busca recrutadores que recrutaram pelo menos 1 pessoa
+    // Busca recrutadores que tiveram pelo menos 1 recrutamento finalizado
     const recrutadoresComRec = getDb().prepare(
-      "SELECT DISTINCT recrutador_id FROM recrutamentos WHERE recrutador_id IS NOT NULL"
+      "SELECT DISTINCT recrutador_id FROM recrutamentos WHERE recrutador_id IS NOT NULL AND status IN ('aprovado','reprovado')"
     ).all().map(r => r.recrutador_id)
 
     if (recrutadoresComRec.length === 0) {
       return interaction.editReply({ content: '⚠️ Nenhum recrutador com recrutamentos registrados ainda.' })
     }
 
-    // Filtra os que estão no servidor para montar as opções do select
+    // Popula o cache de membros de uma vez (resolve problema pós-restart)
+    await interaction.guild.members.fetch().catch(() => null)
+
+    // Monta as opções do select
     const opcoes = []
     for (const uid of recrutadoresComRec.slice(0, 25)) {
       const membro = interaction.guild.members.cache.get(uid)
-        || await interaction.guild.members.fetch(uid).catch(() => null)
-      const nome = membro ? membro.displayName : `ID: ${uid}`
-      // Conta total deste recrutador
+      const nome   = membro ? membro.displayName : `ID: ${uid}`
+      // Conta só recrutamentos finalizados deste recrutador
       const total = getDb().prepare(
-        "SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=?"
+        "SELECT COUNT(DISTINCT candidato_id) AS c FROM recrutamentos WHERE recrutador_id=? AND status IN ('aprovado','reprovado')"
       ).get(uid)?.c ?? 0
       opcoes.push({
-        label: nome.slice(0, 100),
+        label:       nome.slice(0, 100),
         description: `${total} recrutamento${total !== 1 ? 's' : ''} registrado${total !== 1 ? 's' : ''}`,
-        value: uid,
+        value:       uid,
       })
     }
 
@@ -1242,6 +1253,181 @@ async function execute(interaction) {
     }
 
     return interaction.editReply({ content: '✅ Relatório gerado e enviado no canal!' })
+  }
+
+
+  // ── Ver Respostas da Entrevista ───────────────────────────────────────────
+  if (id.startsWith('rec_ver_resp_')) {
+    if (!isRecrutador(interaction.member))
+      return interaction.reply({ content: '❌ Sem permissão.', ephemeral: true })
+    if (interaction.replied || interaction.deferred) return
+    await interaction.deferReply({ ephemeral: true })
+
+    const candidatoId = id.replace('rec_ver_resp_', '')
+    const { recGetRespostas } = require('../database/manager.js')
+
+    // Busca o ticket_id (channel.id) pelo candidato_id na tabela recrutamentos
+    const rowTicket = getDb()
+      .prepare("SELECT ticket_id FROM recrutamentos WHERE candidato_id=? AND ticket_id IS NOT NULL ORDER BY fechado_em DESC LIMIT 1")
+      .get(candidatoId)
+
+    const respostas = rowTicket?.ticket_id ? recGetRespostas(rowTicket.ticket_id) : []
+
+    if (!respostas || respostas.length === 0) {
+      return interaction.editReply({
+        content: '⚠️ Nenhuma resposta encontrada para este candidato.\n-# As respostas só são salvas em entrevistas realizadas após a atualização do sistema.',
+      })
+    }
+
+    const membro = await interaction.guild.members.fetch(candidatoId).catch(() => null)
+    const nomeDisplay = membro ? membro.displayName : `ID: ${candidatoId}`
+    const agora_fmt   = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+
+    const respostasHtml = respostas.map((r, i) => `
+      <div class="qa-block">
+        <div class="qa-number">Pergunta ${i + 1}</div>
+        <div class="qa-pergunta">${r.pergunta.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+        <div class="qa-resposta">${r.resposta.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+      </div>
+    `).join('')
+
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Respostas — ${nomeDisplay}</title>
+  <style>
+    :root {
+      --bg-primary: #313338;
+      --bg-secondary: #2b2d31;
+      --bg-tertiary: #1e1f22;
+      --text-normal: #dbdee1;
+      --text-muted: #949ba4;
+      --header-primary: #f2f3f5;
+      --ms13-accent: #9B59B6;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: var(--bg-primary); color: var(--text-normal); font-family: 'gg sans', 'Noto Sans', sans-serif; }
+    .container { max-width: 800px; margin: 0 auto; padding: 24px 16px; }
+    header {
+      background: var(--bg-tertiary);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      border-left: 5px solid var(--ms13-accent);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .header-icon { font-size: 2rem; }
+    .header-info { flex: 1; }
+    .header-title { font-size: 1.4rem; font-weight: 700; color: var(--header-primary); }
+    .header-sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 4px; }
+    .info-card {
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .info-item .label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .info-item .value { font-size: 0.95rem; color: var(--header-primary); font-weight: 600; margin-top: 2px; }
+    .qa-block {
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      margin-bottom: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .qa-number {
+      background: var(--ms13-accent);
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 4px 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .qa-pergunta {
+      padding: 12px 16px 8px;
+      font-size: 0.95rem;
+      color: var(--header-primary);
+      font-weight: 600;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .qa-resposta {
+      padding: 12px 16px;
+      font-size: 0.9rem;
+      color: var(--text-normal);
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    footer {
+      margin-top: 32px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    .footer-logo { color: var(--ms13-accent); font-weight: 700; font-size: 0.9rem; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-icon">📋</div>
+      <div class="header-info">
+        <div class="header-title">Respostas da Entrevista</div>
+        <div class="header-sub">MS-13 Roleplay • Sistema de Recrutamento</div>
+      </div>
+    </header>
+    <div class="info-card">
+      <div class="info-item">
+        <div class="label">Candidato</div>
+        <div class="value">${nomeDisplay.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+      </div>
+      <div class="info-item">
+        <div class="label">ID Discord</div>
+        <div class="value">${candidatoId}</div>
+      </div>
+      <div class="info-item">
+        <div class="label">Total de Perguntas</div>
+        <div class="value">${respostas.length}</div>
+      </div>
+      <div class="info-item">
+        <div class="label">Gerado em</div>
+        <div class="value">${agora_fmt}</div>
+      </div>
+    </div>
+    ${respostasHtml}
+    <footer>
+      <div class="footer-logo">MS-13 • OMERTÀ</div>
+      <p>Documento gerado automaticamente pelo sistema de recrutamento.</p>
+      <p>O silêncio é lei.</p>
+    </footer>
+  </div>
+</body>
+</html>`
+
+    const fs   = require('fs')
+    const path = require('path')
+    const { AttachmentBuilder } = require('discord.js')
+    const dir  = path.join(process.cwd(), 'transcripts')
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const fname = `respostas-${candidatoId}-${Math.floor(Date.now() / 1000)}.html`
+    const fpath = path.join(dir, fname)
+    fs.writeFileSync(fpath, html, 'utf8')
+    const arquivo = new AttachmentBuilder(fpath, { name: fname })
+    await interaction.editReply({
+      content: `📋 **Respostas de ${nomeDisplay}** — ${respostas.length} pergunta${respostas.length !== 1 ? 's' : ''}`,
+      files: [arquivo],
+    })
+    setTimeout(() => { try { fs.unlinkSync(fpath) } catch {} }, 5_000)
+    return
   }
 
   // ── Ver blacklist ─────────────────────────────────────────────────────────
@@ -1564,6 +1750,7 @@ const customIds = [
   'rec_bl_adicionar','rec_bl_user_select','rec_bl_confirmar','rec_bl_cancelar',
   'rec_bl_remover','rec_bl_remover_select','rec_bl_remover_confirmar',
   'sel_cand_v14','sel_rec_v14','rec_select_candidatos',
+  'rec_ver_resp_', // prefixo dinâmico — handler usa .startsWith()
   'modal_rec_fechar','modal_rec_renomear','modal_rec_aprovar','modal_rec_blacklist',
   'modal_rec_add_q','modal_rec_edit_q','modal_rec_import_q',
 ]

@@ -47,6 +47,18 @@ module.exports = {
       advOk = true
     } catch (_) {}
 
+    // ── Restaurar timeouts de advs com prazo (persiste entre restarts) ────────
+    let advRestoreOk = false
+    try {
+      const { advInitDb }         = require('../database/manager')
+      const { restaurarTimeouts } = require('../systems/advManager')
+      advInitDb()                       // garante tabela SQLite
+      await restaurarTimeouts(client)   // recria timeouts ou dispara imediatamente
+      advRestoreOk = true
+    } catch (err) {
+      console.error('[ready] Erro ao restaurar timeouts de adv:', err)
+    }
+
     // ── Painel final ─────────────────────────────────────────────────────────
     logger.online({
       tag:    client.user.tag,
