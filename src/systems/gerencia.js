@@ -135,44 +135,64 @@ async function sendDM(user, container) {
   try { await user.send({ components: [container], flags: MessageFlags.IsComponentsV2 }) } catch {}
 }
 
-// ─── Helpers de log Components V2 minimalistas ──────────────────────────────────────────────
+// ─── Helpers de log Components V2 ─────────────────────────────────────────────
 function logAdv(proxAdv, targetId, targetTag, executorId, motivo, prova, valorFmt = null, prazoIso = null, statusLine = null) {
   const cor    = proxAdv >= 3 ? COLOR_ERROR : COLOR_WARNING
   const titulo = proxAdv >= 3
-    ? '🚨 Expulsão Automática — 3ª Advertência'
-    : `⚠️ Advertência ${proxAdv} Aplicada`
+    ? '🚨 3ª Advertência — Última Chance'
+    : proxAdv === 2
+      ? '⚠️ 2ª Advertência Aplicada'
+      : '⚠️ 1ª Advertência Aplicada'
 
-  const prazoLine = prazoIso
-    ? `\n> ⏰ **Prazo:** <t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:F> (<t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:R>)`
-    : ''
-  const valorLine = valorFmt
-    ? `\n> 💰 **Multa:** ${valorFmt}`
-    : ''
-  const statusBlock = statusLine
-    ? `\n\n${statusLine}`
-    : ''
+  const ts = prazoIso ? Math.floor(new Date(prazoIso).getTime() / 1000) : null
 
-  return new ContainerBuilder()
+  const container = new ContainerBuilder()
     .setAccentColor(cor)
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        `## ${titulo}\n\n` +
-        `> 👤 **Membro:** <@${targetId}> \`${targetTag}\`\n` +
-        `> ⚙️ **Executor:** <@${executorId}>\n` +
-        `> 🔢 **ADV:** ADV ${proxAdv}\n` +
-        `> 📝 **Motivo:** ${motivo}` +
-        valorLine +
-        prazoLine +
-        `\n> 🔗 **Prova:** ${prova}` +
-        statusBlock
-      )
-    )
-    .addSeparatorComponents(new SeparatorBuilder())
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`-# ⚠️ Gerência MS-13 • ${FOOTER_TEXT}`)
-    )
-}
 
+  // ── Cabeçalho ──
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`## ${titulo}`)
+  )
+
+  container.addSeparatorComponents(new SeparatorBuilder().setSpacing(1))
+
+  // ── Membro e Executor ──
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `👤 **Membro**\n<@${targetId}> \`${targetTag}\`\n\n` +
+      `⚙️ **Executor**\n<@${executorId}>`
+    )
+  )
+
+  container.addSeparatorComponents(new SeparatorBuilder().setSpacing(1))
+
+  // ── Detalhes da ADV ──
+  let detalhes = `📝 **Motivo**\n${motivo}`
+  if (valorFmt) detalhes += `\n\n💰 **Multa**\n${valorFmt}`
+  if (ts)       detalhes += `\n\n⏰ **Prazo**\n<t:${ts}:F> • <t:${ts}:R>`
+  if (prova && prova !== 'Não informado') detalhes += `\n\n🔗 **Prova**\n${prova}`
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(detalhes)
+  )
+
+  // ── Status (adv paga / prazo vencido) ──
+  if (statusLine) {
+    container.addSeparatorComponents(new SeparatorBuilder().setSpacing(1))
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(statusLine)
+    )
+  }
+
+  container.addSeparatorComponents(new SeparatorBuilder().setSpacing(1))
+
+  // ── Rodapé ──
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`-# ⚠️ Gerência MS-13 • ADV ${proxAdv} • ${FOOTER_TEXT}`)
+  )
+
+  return container
+}
 function logExo(targetId, targetTag, executorId, motivo, prova) {
   return new ContainerBuilder()
     .setAccentColor(COLOR_ERROR)
