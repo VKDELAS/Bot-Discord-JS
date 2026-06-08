@@ -21,6 +21,27 @@ const {
 // ─── Mapa de timeouts ativos (userId → TimeoutId) ─────────────────────────────
 const _advTimeouts = new Map()
 
+// ─── Valores e prazos padrão por nível de ADV ─────────────────────────────────
+const ADV_VALORES = {
+  2: 250_000,   // R$ 250.000
+  3: 300_000,   // R$ 300.000
+}
+const ADV_PRAZO_DIAS = {
+  2: 5,         // 5 dias
+  3: 5,         // 5 dias (antes da expulsão automática)
+}
+
+/** Formata um número em string de dinheiro: "R$ 250.000" */
+function _fmtValor(v) {
+  return `R$ ${v.toLocaleString('pt-BR')}`
+}
+
+/** Retorna prazoMs padrão em ms para ADV 2 e 3. */
+function _prazoMsPadrao(advNum) {
+  const dias = ADV_PRAZO_DIAS[advNum]
+  return dias ? dias * 24 * 60 * 60 * 1000 : null
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PARSE DE PRAZO
 // Aceita: "3 dias", "72h", "72 horas", "1 semana", "30min", "10m", etc.
@@ -106,9 +127,23 @@ function _dmPrazoVencido(proxAdv, motivo) {
     )
 }
 
-/** DM enviada ao membro quando a adv é aplicada manualmente ou via sistema. */
-function _dmAdvAplicada(proxAdv, motivo, valorFmt, prazoRaw) {
-  // ADV 3: prazo de graca de 72h antes da expulsao automatica
+/**
+ * DM enviada ao membro quando a adv é aplicada manualmente ou via sistema.
+ * @param {number}      proxAdv   - Número da ADV (1, 2 ou 3)
+ * @param {string}      motivo    - Motivo da advertência
+ * @param {string|null} valorFmt  - Valor formatado da multa (ex: "R$ 250.000") ou null
+ * @param {string|null} prazoRaw  - Prazo em texto legível (ex: "5 dia(s)") ou null
+ * @param {string|null} prazoIso  - ISO string do prazo para timestamp Discord ou null
+ */
+function _dmAdvAplicada(proxAdv, motivo, valorFmt, prazoRaw, prazoIso = null) {
+  // Helper para montar linha de prazo com timestamp Discord
+  const _linhaPrazo = (prazoRaw, prazoIso, label = 'Prazo para resolução') => {
+    if (!prazoRaw && !prazoIso) return `\n> ℹ️ Sem prazo definido — resolva com a gerência.`
+    const ts = prazoIso ? `<t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:F> (<t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:R>)` : prazoRaw
+    return `\n> ⏰ **${label}:** ${ts}`
+  }
+
+  // ADV 3: prazo de 5 dias antes da expulsão automática
   if (proxAdv >= 3) {
     return new ContainerBuilder()
       .setAccentColor(COLOR_ERROR)
@@ -118,7 +153,10 @@ function _dmAdvAplicada(proxAdv, motivo, valorFmt, prazoRaw) {
           `Você acumulou **3 advertências** na MS-13.\n\n` +
           `> 📝 **Motivo:** ${motivo}\n` +
           (valorFmt ? `> 💰 **Multa:** ${valorFmt}\n` : '') +
-          `> ⏰ **Prazo para quitar:** **${prazoRaw ?? '72h'}**\n\n` +
+          `> ⏰ **Prazo para quitar:** ${prazoIso
+            ? `<t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:F> (<t:${Math.floor(new Date(prazoIso).getTime() / 1000)}:R>)`
+            : `**${prazoRaw ?? '5 dias'}**`
+          }\n\n` +
           `⚠️ **Se você não quitar dentro do prazo, será expulso(a) automaticamente da facção.**\n` +
           `Entre em contato com a gerência para resolver sua situação.`
         )
@@ -129,17 +167,34 @@ function _dmAdvAplicada(proxAdv, motivo, valorFmt, prazoRaw) {
       )
   }
 
-  // ADV 1 e 2 - comportamento original
-  let desc = `Você recebeu a **${proxAdv}ª advertência** na MS-13.\n\n**Motivo:** ${motivo}`
+  // ADV 2: multa de R$250.000 e prazo de 5 dias
+  if (proxAdv === 2) {
+    let desc = `Você recebeu a **2ª advertência** na MS-13.\n\n> 📝 **Motivo:** ${motivo}`
+    if (valorFmt) desc += `\n> 💰 **Multa:** ${valorFmt}`
+    desc += _linhaPrazo(prazoRaw, prazoIso, 'Prazo para resolução')
+    desc += `\n\n> ‼️ Na próxima advertência você será **expulso(a) automaticamente** da facção.`
+
+    return new ContainerBuilder()
+      .setAccentColor(COLOR_WARNING)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`## ⚠️ Você recebeu ADV 2 — MS-13\n\n${desc}`)
+      )
+      .addSeparatorComponents(new SeparatorBuilder())
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`-# MS-13 Roleplay • Notificação Oficial`)
+      )
+  }
+
+  // ADV 1
+  let desc = `Você recebeu a **1ª advertência** na MS-13.\n\n> 📝 **Motivo:** ${motivo}`
   if (valorFmt) desc += `\n> 💰 **Multa:** ${valorFmt}`
-  if (prazoRaw) desc += `\n> ⏰ **Prazo para resolução:** ${prazoRaw}`
-  if (!prazoRaw) desc += `\n> ℹ️ Sem prazo definido — resolva com a gerência.`
-  if (proxAdv === 2) desc += `\n\n> ‼️ Na próxima advertência você terá **72h** para quitar ou será **expulso(a) automaticamente**.`
+  if (prazoRaw || prazoIso) desc += _linhaPrazo(prazoRaw, prazoIso, 'Prazo para resolução')
+  else desc += `\n> ℹ️ Sem prazo definido — resolva com a gerência.`
 
   return new ContainerBuilder()
     .setAccentColor(COLOR_WARNING)
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`## ⚠️ Você recebeu ADV ${proxAdv} — MS-13\n\n${desc}`)
+      new TextDisplayBuilder().setContent(`## ⚠️ Você recebeu ADV 1 — MS-13\n\n${desc}`)
     )
     .addSeparatorComponents(new SeparatorBuilder())
     .addTextDisplayComponents(
@@ -529,12 +584,16 @@ async function aplicarAdvertencia(guild, targetMember, motivo, prova, executorTa
     _advTimeouts.delete(targetMember.id)
   }
 
-  // ── ADV 3 → prazo de graça de 72h antes da expulsão automática ────────────
+  // ── ADV 3 → prazo de 5 dias antes da expulsão automática ─────────────────
   if (proxAdv >= 3) {
-    const ADV3_PRAZO_MS = 72 * 60 * 60 * 1000 // 72h fixo
+    const ADV3_PRAZO_MS = _prazoMsPadrao(3) // 5 dias
+    // Garante valor: se não veio do caller, usa o padrão de 300k
+    if (!valorFmt && ADV_VALORES[3]) valorFmt = _fmtValor(ADV_VALORES[3])
+
     if (ADV_CARGO_IDS[3]) await targetMember.roles.add(ADV_CARGO_IDS[3]).catch(() => {})
 
     const prazoIso3 = new Date(Date.now() + ADV3_PRAZO_MS).toISOString()
+    const prazoDisplay3 = `${ADV_PRAZO_DIAS[3]} dias`
 
     // Persiste — sem log_msg_id ainda, atualiza depois
     advSalvar(targetMember.id, 3, motivo, executorTag, prazoIso3, null)
@@ -542,10 +601,10 @@ async function aplicarAdvertencia(guild, targetMember, motivo, prova, executorTa
     // Agenda expulsão automática no vencimento
     _agendarTimeout(guild.client, guild, targetMember.id, prazoIso3, motivo)
 
-    // DM de última advertência com prazo
+    // DM de última advertência com prazo e valor
     try {
       await targetMember.user.send({
-        components: [_dmAdvAplicada(3, motivo, valorFmt, '72h')],
+        components: [_dmAdvAplicada(3, motivo, valorFmt, prazoDisplay3, prazoIso3)],
         flags: MessageFlags.IsComponentsV2,
       })
     } catch {}
@@ -578,7 +637,7 @@ async function aplicarAdvertencia(guild, targetMember, motivo, prova, executorTa
               `> **${targetMember.user.tag}** recebeu a **ADV 3** (última advertência).\n` +
               `> 📝 **Motivo:** ${motivo}\n` +
               (valorFmt ? `> 💰 **Multa:** ${valorFmt}\n` : '') +
-              `> ⏰ **Prazo para quitar:** <t:${Math.floor(new Date(prazoIso3).getTime() / 1000)}:R>\n` +
+              `> ⏰ **Prazo para quitar:** <t:${Math.floor(new Date(prazoIso3).getTime() / 1000)}:R> (${prazoDisplay3})\n` +
               `> ⚠️ Sem pagamento dentro do prazo → **expulsão automática**.`
             )
           )
@@ -590,6 +649,11 @@ async function aplicarAdvertencia(guild, targetMember, motivo, prova, executorTa
   }
 
   // ── ADV 1 ou 2 → aplica cargo + persiste + agenda ──────────────────────
+  // Para ADV 2: garante valor e prazo padrão se não vieram do caller
+  if (proxAdv === 2) {
+    if (!valorFmt && ADV_VALORES[2]) valorFmt = _fmtValor(ADV_VALORES[2])
+    if (prazoMs == null) prazoMs = _prazoMsPadrao(2) // 5 dias
+  }
   await targetMember.roles.add(ADV_CARGO_IDS[proxAdv]).catch(() => {})
 
   const prazoIso = prazoMs != null ? new Date(Date.now() + prazoMs).toISOString() : null
@@ -614,7 +678,7 @@ async function aplicarAdvertencia(guild, targetMember, motivo, prova, executorTa
 
   try {
     await targetMember.user.send({
-      components: [_dmAdvAplicada(proxAdv, motivo, valorFmt, prazoRawDisplay)],
+      components: [_dmAdvAplicada(proxAdv, motivo, valorFmt, prazoRawDisplay, prazoIso)],
       flags: MessageFlags.IsComponentsV2,
     })
   } catch {}

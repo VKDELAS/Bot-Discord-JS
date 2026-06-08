@@ -50,7 +50,7 @@ function buildEmbedGerencia() {
       '## ⚠️ Aplicar Advertência\n' +
       '> Aplica advertência formal e acumulativa ao membro.\n' +
       '> **ADV 1** e **ADV 2** aplicam cargo temporário de advertência.\n' +
-      '> **ADV 3** aplica cargo de última advertência com **72h para quitar**.\n' +
+      '> **ADV 3** aplica cargo de última advertência com **5 dias para quitar**.\n' +
       '> Sem pagamento no prazo → **expulsão automática** da facção.\n' +
       '> O membro recebe notificação via **DM** após cada ação.'
     )
@@ -304,7 +304,7 @@ async function execute(interaction) {
 
     const advAtual = getAdvAtual(target)
     const proxAdv  = advAtual + 1
-    const aviso    = proxAdv >= 3 ? '\n> ‼️ Esta será a **3ª advertência** — o membro terá **72h para quitar** ou será **expulso automaticamente**.' : ''
+    const aviso    = proxAdv >= 3 ? '\n> ‼️ Esta será a **3ª advertência** — o membro terá **5 dias para quitar** ou será **expulso automaticamente**.' : ''
 
     return interaction.update({
       content:
@@ -424,7 +424,7 @@ async function execute(interaction) {
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
           .setMaxLength(20)
-          .setPlaceholder('Ex: 250000 — vazio = sem multa')
+          .setPlaceholder('Ex: 250000 — vazio = padrão (ADV2: 250k / ADV3: 300k)')
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -433,7 +433,7 @@ async function execute(interaction) {
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
           .setMaxLength(50)
-          .setPlaceholder('Ex: 3 dias, 72h, 1 semana — vazio = sem prazo')
+          .setPlaceholder('Ex: 3 dias, 72h — vazio = padrão (ADV2 e ADV3: 5 dias)')
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -491,12 +491,12 @@ async function execute(interaction) {
 
     selectContextMap.delete(interaction.user.id)
 
-    const prazoInfo = prazoMs ? ` · prazo: **${prazoRaw.trim()}**` : ''
-    const valorInfo = valorFmt ? ` · multa: **${valorFmt}**` : ''
+    const prazoInfo = prazoMs ? ` · prazo: **${prazoRaw.trim()}**` : (proxAdv === 2 ? ' · prazo: **5 dias**' : '')
+    const valorInfo = valorFmt ? ` · multa: **${valorFmt}**` : (proxAdv === 2 ? ' · multa: **R$ 250.000**' : proxAdv === 3 ? ' · multa: **R$ 300.000**' : '')
 
     return interaction.editReply({
       content: proxAdv >= 3
-        ? `⚠️ **ADV 3** aplicada para **${ctx.targetTag}** — prazo de **72h** para quitar. Sem pagamento → expulsão automática.`
+        ? `⚠️ **ADV 3** aplicada para **${ctx.targetTag}** — prazo de **5 dias** para quitar (multa: **R$ 300.000**). Sem pagamento → expulsão automática.`
         : `✅ **ADV ${proxAdv}** aplicada para **${ctx.targetTag}**${prazoInfo}${valorInfo}.`,
     })
   }
