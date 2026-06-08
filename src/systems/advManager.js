@@ -488,46 +488,49 @@ async function _aplicarProximaAdv(client, guild, userId, motivoOriginal) {
       }).catch(console.error)
 
     } else {
-      // ── ADV 1 ou 2 → aplica novo cargo, DM e log ──────────────────────────────
+      // ── ADV 1 → 2: aplica valor e prazo padrão automaticamente ───────────────
+      const autoValorFmt    = proxAdv === 2 ? _fmtValor(ADV_VALORES[2]) : null
+      const autoPrazoMs     = proxAdv === 2 ? _prazoMsPadrao(2) : null
+      const autoPrazoIso    = autoPrazoMs ? new Date(Date.now() + autoPrazoMs).toISOString() : null
+      const autoPrazoDisplay = autoPrazoMs ? `${ADV_PRAZO_DIAS[2]} dias` : null
+
       await member.roles.add(ADV_CARGO_IDS[proxAdv]).catch(() => {})
 
-      // Persiste no banco (sem novo prazo — prazo venceu, sem log_msg_id ainda)
-      advSalvar(userId, proxAdv, motivoOriginal, 'Sistema (prazo vencido)', null, null)
+      // Persiste com prazo e executor corretos — sem log_msg_id ainda
+      advSalvar(userId, proxAdv, motivoOriginal, 'Sistema (prazo vencido)', autoPrazoIso, null)
 
-      // DM pro membro
+      // Agenda timeout da nova ADV 2
+      if (autoPrazoIso) {
+        _agendarTimeout(guild.client, guild, userId, autoPrazoIso, motivoOriginal)
+      }
+
+      // DM com valor e prazo corretos
       try {
         await member.user.send({
-          components: [
-            new ContainerBuilder()
-              .setAccentColor(COLOR_WARNING)
-              .addTextDisplayComponents(
-                new TextDisplayBuilder().setContent(
-                  `## ⏰ Prazo de ADV vencido — MS-13\n\n` +
-                  `O prazo da sua **ADV ${advAtualNo}** venceu sem pagamento.\n` +
-                  `Você recebeu automaticamente a **ADV ${proxAdv}**.\n\n` +
-                  `**Motivo original:** ${motivoOriginal}` +
-                  (proxAdv === 2
-                    ? '\n\n> ‼️ Na próxima advertência você terá **72h** para quitar ou será **expulso(a) automaticamente**.'
-                    : '')
-                )
-              )
-              .addSeparatorComponents(new SeparatorBuilder())
-              .addTextDisplayComponents(
-                new TextDisplayBuilder().setContent(`-# MS-13 Roleplay • Notificação Oficial`)
-              )
-          ],
+          components: [_dmAdvAplicada(proxAdv, motivoOriginal, autoValorFmt, autoPrazoDisplay, autoPrazoIso)],
           flags: MessageFlags.IsComponentsV2,
         })
       } catch {}
 
-      // Log nos canais
+      // Log nos canais — ADV 2 gerada pelo sistema também tem botão de pagar
       const logCh = guild.channels.cache.get(CHANNEL_IDS.logs_adv_gerencia)
       const pubCh = guild.channels.cache.get(CHANNEL_IDS.pub_adv)
 
-      if (logCh) await logCh.send({
-        components: [_logPrazoVencido(proxAdv, userId, targetTag, motivoOriginal)],
-        flags: MessageFlags.IsComponentsV2,
-      }).catch(console.error)
+      if (logCh) {
+        const { logAdv } = require('./gerencia.js')
+        const logMsg = await logCh.send({
+          components: [
+            logAdv(proxAdv, userId, targetTag, 'Sistema (prazo vencido)', motivoOriginal, '*(automático)*', autoValorFmt, autoPrazoIso),
+            _buildBotaoPaga(userId),
+          ],
+          flags: MessageFlags.IsComponentsV2,
+        }).catch(console.error) ?? null
+
+        // Persiste o log_msg_id para edição futura (botão pagar)
+        if (logMsg) {
+          advSalvar(userId, proxAdv, motivoOriginal, 'Sistema (prazo vencido)', autoPrazoIso, logMsg.id)
+        }
+      }
 
       if (pubCh) await pubCh.send({
         components: [
@@ -536,8 +539,10 @@ async function _aplicarProximaAdv(client, guild, userId, motivoOriginal) {
             .addTextDisplayComponents(
               new TextDisplayBuilder().setContent(
                 `## 📢 ADV ${proxAdv} — Prazo Vencido\n\n` +
-                `> **${targetTag}** avançou para **ADV ${proxAdv}** após o prazo vencer.\n` +
-                `> 📝 **Motivo original:** ${motivoOriginal}`
+                `> **${targetTag}** avançou para **ADV ${proxAdv}** após o prazo da ADV ${advAtualNo} vencer.\n` +
+                `> 📝 **Motivo original:** ${motivoOriginal}\n` +
+                (autoValorFmt ? `> 💰 **Multa:** ${autoValorFmt}\n` : '') +
+                (autoPrazoIso ? `> ⏰ **Novo prazo:** <t:${Math.floor(new Date(autoPrazoIso).getTime() / 1000)}:R>` : '')
               )
             )
         ],
