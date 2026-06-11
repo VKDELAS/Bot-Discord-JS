@@ -428,6 +428,11 @@ async function execute(interaction) {
     }
 
     if (tipo === 'suporte') {
+      // showModal só funciona se a interaction ainda não foi respondida de nenhuma forma
+      if (interaction.deferred || interaction.replied) {
+        console.error('[ERRO TicketSelect] Interaction já usada antes do showModal (suporte). Verifique o router.')
+        return
+      }
       return interaction.showModal(
         new ModalBuilder()
           .setCustomId('sup_modal_v14')
@@ -447,6 +452,10 @@ async function execute(interaction) {
     }
 
     if (tipo === 'elite') {
+      if (interaction.deferred || interaction.replied) {
+        console.error('[ERRO TicketSelect] Interaction já usada antes do showModal (elite). Verifique o router.')
+        return
+      }
       return interaction.showModal(
         new ModalBuilder()
           .setCustomId('eli_modal_v14')
@@ -466,6 +475,10 @@ async function execute(interaction) {
     }
 
     if (tipo === 'parceria') {
+      if (interaction.deferred || interaction.replied) {
+        console.error('[ERRO TicketSelect] Interaction já usada antes do showModal (parceria). Verifique o router.')
+        return
+      }
       return interaction.showModal(
         new ModalBuilder()
           .setCustomId('par_modal_v14')

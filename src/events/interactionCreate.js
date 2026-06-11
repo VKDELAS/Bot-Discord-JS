@@ -31,21 +31,27 @@ module.exports = {
         return
       }
 
-      // Match exato primeiro
+      // ── Match exato — sempre tem prioridade máxima ────────────────────────
       if (systemHandlers.has(customId)) {
         await systemHandlers.get(customId)(interaction, client)
         return
       }
 
-      // Match por prefixo (IDs dinâmicos: ap_userId, re_userId, ger_exo_cont_id, etc.)
-      // Percorre todos os handlers registrados e testa se o customId começa com aquela chave.
-      // Isso cobre qualquer prefixo dinâmico sem precisar manter lista manual de prefixos.
+      // ── Match por prefixo (IDs dinâmicos: ap_userId, re_userId, etc.) ─────
+      // IMPORTANTE: só aplica prefixo se a chave termina com '_' (separador),
+      // evitando falso-positivo onde 'tkt_s' casaria com 'tkt_select_v14'.
+      // Modais e selects estáticos (ex: tkt_select_v14, sup_modal_v14) NUNCA
+      // devem cair aqui — eles têm match exato acima.
+      let matched = false
       for (const [key, handler] of systemHandlers.entries()) {
-        if (customId.startsWith(key) && key !== customId) {
+        if (key.endsWith('_') && customId.startsWith(key)) {
+          console.log(`[interactionCreate] Prefixo match: "${key}" → customId: "${customId}"`)
           await handler(interaction, client)
-          return
+          matched = true
+          break
         }
       }
+      if (matched) return
 
       console.warn(`[interactionCreate] Nenhum handler para customId: ${customId}`)
 
