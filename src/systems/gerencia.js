@@ -537,7 +537,7 @@ async function execute(interaction) {
     // Remove todos os cargos MS-13
     const todosCargos = [
       MS13_ROLE_ID,
-      ...ROLES.isento, ...ROLES.elite, ...ROLES.membro,
+      ...ROLES.isento, ...ROLES.gerencia, ...ROLES.frente, ...ROLES.membro,
       ROLE_IDS.meta_paga, ROLE_IDS.etapa2,
       ADV_CARGO_IDS[1], ADV_CARGO_IDS[2], ADV_CARGO_IDS[3],
     ].filter(id => id && target.roles.cache.has(id))
